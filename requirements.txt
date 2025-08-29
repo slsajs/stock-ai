@@ -1,0 +1,6 @@
+aiohttp
+websockets
+pandas
+numpy
+python-telegram-bot
+python-dotenv

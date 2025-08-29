@@ -1,0 +1,257 @@
+import asyncio
+import aiohttp
+import websockets
+import json
+import logging
+from datetime import datetime
+from typing import Dict, Optional, List
+import hashlib
+import hmac
+import base64
+from urllib.parse import urlencode
+
+logger = logging.getLogger(__name__)
+
+class KISAPIClient:
+    def __init__(self, app_key: str, app_secret: str, account_no: str, is_demo: bool = True):
+        self.app_key = app_key
+        self.app_secret = app_secret
+        self.account_no = account_no
+        self.is_demo = is_demo
+        
+        self.base_url = "https://openapivts.koreainvestment.com:29443" if is_demo else "https://openapi.koreainvestment.com:9443"
+        self.ws_url = "ws://ops.koreainvestment.com:21000" if is_demo else "ws://ops.koreainvestment.com:31000"
+        
+        self.access_token = None
+        self.session = None
+        self.websocket = None
+        
+        self.rate_limiter = asyncio.Semaphore(20)  # 초당 20회 제한
+        
+    async def __aenter__(self):
+        self.session = aiohttp.ClientSession()
+        await self.get_access_token()
+        return self
+    
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        if self.websocket:
+            await self.websocket.close()
+        if self.session:
+            await self.session.close()
+    
+    async def get_access_token(self):
+        """액세스 토큰 획득"""
+        url = f"{self.base_url}/oauth2/tokenP"
+        data = {
+            "grant_type": "client_credentials",
+            "appkey": self.app_key,
+            "appsecret": self.app_secret
+        }
+        
+        async with self.session.post(url, json=data) as response:
+            if response.status == 200:
+                result = await response.json()
+                self.access_token = result.get("access_token")
+                logger.info("Access token obtained successfully")
+            else:
+                logger.error(f"Failed to get access token: {response.status}")
+                raise Exception("Failed to get access token")
+    
+    def _get_headers(self, tr_id: str, custtype: str = "P"):
+        """API 요청 헤더 생성"""
+        return {
+            "Content-Type": "application/json",
+            "authorization": f"Bearer {self.access_token}",
+            "appkey": self.app_key,
+            "appsecret": self.app_secret,
+            "tr_id": tr_id,
+            "custtype": custtype
+        }
+    
+    async def _request(self, method: str, url: str, headers: Dict, data: Optional[Dict] = None):
+        """API 요청 (Rate Limiting 적용)"""
+        async with self.rate_limiter:
+            if method.upper() == "GET":
+                async with self.session.get(url, headers=headers, params=data) as response:
+                    return await response.json()
+            elif method.upper() == "POST":
+                async with self.session.post(url, headers=headers, json=data) as response:
+                    return await response.json()
+    
+    async def get_current_price(self, stock_code: str) -> Dict:
+        """현재가 조회"""
+        url = f"{self.base_url}/uapi/domestic-stock/v1/quotations/inquire-price"
+        headers = self._get_headers("FHKST01010100")
+        params = {
+            "fid_cond_mrkt_div_code": "J",
+            "fid_input_iscd": stock_code
+        }
+        
+        return await self._request("GET", url, headers, params)
+    
+    async def get_orderbook(self, stock_code: str) -> Dict:
+        """호가 정보 조회"""
+        url = f"{self.base_url}/uapi/domestic-stock/v1/quotations/inquire-asking-price-exp-ccn"
+        headers = self._get_headers("FHKST01010200")
+        params = {
+            "fid_cond_mrkt_div_code": "J",
+            "fid_input_iscd": stock_code
+        }
+        
+        return await self._request("GET", url, headers, params)
+    
+    async def place_order(self, stock_code: str, order_type: str, quantity: int, price: int = 0) -> Dict:
+        """주문 실행"""
+        url = f"{self.base_url}/uapi/domestic-stock/v1/trading/order-cash"
+        
+        tr_id = "VTTC0802U" if order_type == "buy" else "VTTC0801U"  # 모의투자
+        if not self.is_demo:
+            tr_id = "TTTC0802U" if order_type == "buy" else "TTTC0801U"  # 실투자
+            
+        headers = self._get_headers(tr_id)
+        data = {
+            "CANO": self.account_no.split("-")[0],
+            "ACNT_PRDT_CD": self.account_no.split("-")[1],
+            "PDNO": stock_code,
+            "ORD_DVSN": "01" if price > 0 else "01",  # 01: 지정가, 01: 시장가
+            "ORD_QTY": str(quantity),
+            "ORD_UNPR": str(price) if price > 0 else "0"
+        }
+        
+        return await self._request("POST", url, headers, data)
+    
+    async def get_balance(self) -> Dict:
+        """잔고 조회"""
+        url = f"{self.base_url}/uapi/domestic-stock/v1/trading/inquire-balance"
+        headers = self._get_headers("VTTC8434R" if self.is_demo else "TTTC8434R")
+        params = {
+            "CANO": self.account_no.split("-")[0],
+            "ACNT_PRDT_CD": self.account_no.split("-")[1],
+            "AFHR_FLPR_YN": "N",
+            "OFL_YN": "",
+            "INQR_DVSN": "02",
+            "UNPR_DVSN": "01",
+            "FUND_STTL_ICLD_YN": "N",
+            "FNCG_AMT_AUTO_RDPT_YN": "N",
+            "PRCS_DVSN": "01",
+            "CTX_AREA_FK100": "",
+            "CTX_AREA_NK100": ""
+        }
+        
+        return await self._request("GET", url, headers, params)
+    
+    async def get_minute_data(self, stock_code: str, period: str = "1") -> Dict:
+        """분봉 데이터 조회"""
+        url = f"{self.base_url}/uapi/domestic-stock/v1/quotations/inquire-time-itemchartprice"
+        headers = self._get_headers("FHKST03010200")
+        params = {
+            "fid_etc_cls_code": "",
+            "fid_cond_mrkt_div_code": "J",
+            "fid_input_iscd": stock_code,
+            "fid_input_hour_1": period,
+            "fid_pw_data_incu_yn": "Y"
+        }
+        
+        return await self._request("GET", url, headers, params)
+    
+    async def get_websocket_approval_key(self):
+        """WebSocket 접속키 발급"""
+        url = f"{self.base_url}/oauth2/Approval"
+        data = {
+            "grant_type": "client_credentials",
+            "appkey": self.app_key,
+            "secretkey": self.app_secret
+        }
+        
+        async with self.session.post(url, json=data) as response:
+            if response.status == 200:
+                result = await response.json()
+                approval_key = result.get("approval_key")
+                logger.info("WebSocket approval key obtained successfully")
+                logger.debug(f"Approval key: {approval_key}")
+                return approval_key
+            else:
+                logger.error(f"Failed to get WebSocket approval key: {response.status}")
+                text = await response.text()
+                logger.debug(f"Response: {text}")
+                return None
+    
+    async def connect_websocket(self, approval_key: str = None):
+        """WebSocket 연결"""
+        try:
+            if not approval_key:
+                approval_key = await self.get_websocket_approval_key()
+                if not approval_key:
+                    raise Exception("Failed to get WebSocket approval key")
+            
+            self.approval_key = approval_key
+            logger.debug(f"Using approval key: {approval_key}")
+            logger.debug(f"Attempting WebSocket connection to: {self.ws_url}")
+            self.websocket = await websockets.connect(self.ws_url)
+            logger.info("WebSocket connected successfully")
+            logger.debug(f"WebSocket state: {self.websocket.state}")
+        except Exception as e:
+            logger.error(f"WebSocket connection failed: {e}")
+            logger.debug(f"WebSocket URL: {self.ws_url}")
+            raise
+    
+    async def subscribe_realtime_price(self, stock_codes: List[str]):
+        """실시간 현재가 구독"""
+        if not self.websocket:
+            raise Exception("WebSocket not connected")
+        
+        logger.debug(f"Subscribing to {len(stock_codes)} stock codes: {stock_codes}")
+        
+        for stock_code in stock_codes:
+            subscribe_data = {
+                "header": {
+                    "approval_key": getattr(self, 'approval_key', self.app_key),
+                    "custtype": "P",
+                    "tr_type": "1",
+                    "content-type": "utf-8"
+                },
+                "body": {
+                    "input": {
+                        "tr_id": "H0STCNT0",
+                        "tr_key": stock_code
+                    }
+                }
+            }
+            
+            logger.debug(f"Sending subscription data for {stock_code}: {json.dumps(subscribe_data, indent=2)}")
+            await self.websocket.send(json.dumps(subscribe_data))
+            logger.info(f"Subscribed to real-time price for {stock_code}")
+    
+    async def listen_websocket(self, callback):
+        """WebSocket 메시지 수신"""
+        if not self.websocket:
+            raise Exception("WebSocket not connected")
+        
+        logger.info("Starting WebSocket message listener")
+        message_count = 0
+        
+        try:
+            async for message in self.websocket:
+                message_count += 1
+                logger.debug(f"Received WebSocket message #{message_count}")
+                logger.debug(f"Message type: {type(message)}, length: {len(message) if message else 0}")
+                
+                if message:
+                    logger.debug(f"Raw message (first 200 chars): {str(message)[:200]}...")
+                
+                try:
+                    data = json.loads(message)
+                    logger.debug(f"Parsed JSON data keys: {list(data.keys()) if isinstance(data, dict) else 'Not a dict'}")
+                    logger.info(f"Processing WebSocket message #{message_count}")
+                    await callback(data)
+                except json.JSONDecodeError as e:
+                    logger.warning(f"Failed to decode WebSocket message #{message_count}: {e}")
+                    logger.debug(f"Invalid JSON message: {message[:100]}...")
+                except Exception as e:
+                    logger.error(f"Error processing WebSocket message #{message_count}: {e}")
+                    
+        except websockets.exceptions.ConnectionClosed as e:
+            logger.warning(f"WebSocket connection closed: {e}")
+        except Exception as e:
+            logger.error(f"WebSocket listener error: {e}")
+            logger.debug(f"Total messages processed: {message_count}")

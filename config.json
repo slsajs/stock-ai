@@ -1,0 +1,32 @@
+{
+  "trading": {
+    "max_positions": 3,
+    "stop_loss_pct": -3.0,
+    "take_profit_pct": 5.0,
+    "rsi_oversold": 30,
+    "rsi_overbought": 70,
+    "volume_multiplier": 3.0
+  },
+  "target_stocks": {
+    "005930": "삼성전자",
+    "000660": "SK하이닉스",
+    "035420": "NAVER",
+    "005380": "현대차",
+    "051910": "LG화학"
+  },
+  "trading_hours": {
+    "start": "09:00",
+    "end": "15:30"
+  },
+  "api_settings": {
+    "rate_limit_per_second": 20,
+    "retry_attempts": 3,
+    "retry_delay": 1
+  },
+  "logging": {
+    "level": "INFO",
+    "file": "trading.log",
+    "max_file_size_mb": 10,
+    "backup_count": 5
+  }
+}
