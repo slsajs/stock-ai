@@ -65,6 +65,30 @@ class KISAPIClient:
                 logger.error(f"Failed to get access token: {response.status}")
                 raise Exception("Failed to get access token")
     
+    def _parse_account_no(self):
+        """계좌번호를 안전하게 파싱"""
+        try:
+            if "-" in self.account_no:
+                parts = self.account_no.split("-")
+                if len(parts) >= 2:
+                    return parts[0], parts[1]
+            
+            # 하이픈이 없는 경우 (예: 12345678901234)
+            if len(self.account_no) >= 10:
+                # 보통 앞 8자리가 계좌번호, 뒤 2자리가 상품코드
+                cano = self.account_no[:-2]
+                acnt_prdt_cd = self.account_no[-2:]
+                logger.info(f"Parsed account: {cano}-{acnt_prdt_cd}")
+                return cano, acnt_prdt_cd
+            
+            # 기본값 반환
+            logger.warning(f"Unable to parse account_no: {self.account_no}, using as-is")
+            return self.account_no, "01"
+            
+        except Exception as e:
+            logger.error(f"Error parsing account_no {self.account_no}: {e}")
+            return self.account_no, "01"
+
     def _get_headers(self, tr_id: str, custtype: str = "P"):
         """API 요청 헤더 생성"""
         return {
@@ -117,9 +141,13 @@ class KISAPIClient:
             tr_id = "TTTC0802U" if order_type == "buy" else "TTTC0801U"  # 실투자
             
         headers = self._get_headers(tr_id)
+        
+        # 계좌번호 안전하게 파싱
+        cano, acnt_prdt_cd = self._parse_account_no()
+        
         data = {
-            "CANO": self.account_no.split("-")[0],
-            "ACNT_PRDT_CD": self.account_no.split("-")[1],
+            "CANO": cano,
+            "ACNT_PRDT_CD": acnt_prdt_cd,
             "PDNO": stock_code,
             "ORD_DVSN": "01" if price > 0 else "01",  # 01: 지정가, 01: 시장가
             "ORD_QTY": str(quantity),
@@ -132,9 +160,13 @@ class KISAPIClient:
         """잔고 조회"""
         url = f"{self.base_url}/uapi/domestic-stock/v1/trading/inquire-balance"
         headers = self._get_headers("VTTC8434R" if self.is_demo else "TTTC8434R")
+        
+        # 계좌번호 안전하게 파싱
+        cano, acnt_prdt_cd = self._parse_account_no()
+        
         params = {
-            "CANO": self.account_no.split("-")[0],
-            "ACNT_PRDT_CD": self.account_no.split("-")[1],
+            "CANO": cano,
+            "ACNT_PRDT_CD": acnt_prdt_cd,
             "AFHR_FLPR_YN": "N",
             "OFL_YN": "",
             "INQR_DVSN": "02",
