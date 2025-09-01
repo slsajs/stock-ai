@@ -162,6 +162,127 @@ class KISAPIClient:
         
         return await self._request("GET", url, headers, params)
     
+    async def get_volume_ranking(self, market: str = "J", sort: str = "1", count: int = 30) -> Dict:
+        """거래량 순위 조회"""
+        url = f"{self.base_url}/uapi/domestic-stock/v1/quotations/volume-rank"
+        headers = self._get_headers("FHPST01710000")
+        params = {
+            "fid_cond_mrkt_div_code": market,  # J: 코스피+코스닥, 0: 코스피, 1: 코스닥
+            "fid_cond_scr_div_code": "20171",
+            "fid_input_iscd": "0000",
+            "fid_div_cls_code": "0",
+            "fid_blng_cls_code": "0",
+            "fid_trgt_cls_code": "111111111",
+            "fid_trgt_exls_cls_code": "000000",
+            "fid_input_price_1": "",
+            "fid_input_price_2": "",
+            "fid_vol_cnt": "",
+            "fid_input_date_1": ""
+        }
+        
+        return await self._request("GET", url, headers, params)
+    
+    async def get_market_cap_ranking(self, market: str = "J", count: int = 30) -> Dict:
+        """시가총액 순위 조회"""
+        url = f"{self.base_url}/uapi/domestic-stock/v1/quotations/inquire-daily-itemchartprice"
+        headers = self._get_headers("FHKST03010100")
+        params = {
+            "fid_cond_mrkt_div_code": market,
+            "fid_input_iscd": "0001",  # 시가총액 상위
+            "fid_input_date_1": datetime.now().strftime("%Y%m%d"),
+            "fid_input_date_2": datetime.now().strftime("%Y%m%d"),
+            "fid_period_div_code": "D"
+        }
+        
+        return await self._request("GET", url, headers, params)
+    
+    async def get_fluctuation_ranking(self, market: str = "J", sort_type: str = "1") -> Dict:
+        """등락률 순위 조회"""
+        url = f"{self.base_url}/uapi/domestic-stock/v1/quotations/inquire-daily-price"
+        headers = self._get_headers("FHPST01730000")
+        params = {
+            "fid_cond_mrkt_div_code": market,
+            "fid_cond_scr_div_code": "20173",
+            "fid_input_iscd": "0001",
+            "fid_rank_sort_cls_code": sort_type,  # 1: 상승률, 2: 하락률
+            "fid_input_cnt_1": "30",
+            "fid_prc_cls_code": "1",
+            "fid_input_price_1": "1000",  # 최소가격 1000원
+            "fid_input_price_2": "100000"  # 최대가격 100000원
+        }
+        
+        return await self._request("GET", url, headers, params)
+    
+    async def get_active_stocks(self, min_price: int = 5000, max_price: int = 100000, volume_data: Dict = None) -> List[Dict]:
+        """활발한 거래 종목 조회 (거래량 + 등락률 조합)"""
+        try:
+            # 이미 volume_data가 있으면 재사용, 없으면 새로 조회
+            if not volume_data:
+                await asyncio.sleep(1)  # Rate limiting
+                volume_data = await self.get_volume_ranking()
+            
+            if not volume_data or volume_data.get('rt_cd') != '0':
+                logger.error("Failed to get volume ranking for active stocks")
+                return []
+            
+            active_stocks = []
+            for item in volume_data.get('output', [])[:30]:  # 상위 30개 검토
+                try:
+                    stock_code = item.get('mksc_shrn_iscd', '')
+                    stock_name = item.get('hts_kor_isnm', '')
+                    current_price = float(item.get('stck_prpr', 0))
+                    volume = int(item.get('acml_vol', 0))
+                    change_rate = float(item.get('prdy_ctrt', 0))
+                    
+                    # ETF, ETN 제외
+                    if any(exclude in stock_name for exclude in ['ETF', 'ETN', 'KODEX', 'TIGER', 'KBSTAR']):
+                        continue
+                    
+                    # 관리종목 제외 (종목코드로 판단)
+                    if not stock_code or len(stock_code) != 6 or stock_code.startswith(('9', 'Q')):
+                        continue
+                    
+                    # 너무 극단적인 등락률 제외
+                    if abs(change_rate) > 30.0:
+                        continue
+                    
+                    # 필터링 조건
+                    if (min_price <= current_price <= max_price and 
+                        volume > 1000000 and  # 거래량 100만주 이상
+                        abs(change_rate) > 1.0):  # 등락률 1% 이상
+                        
+                        # 점수 계산 (거래량 * 등락률 * 가격 보정)
+                        price_factor = 1.0
+                        if current_price < 10000:
+                            price_factor = 0.8  # 저가주 감점
+                        elif current_price > 50000:
+                            price_factor = 0.9  # 고가주 감점
+                        
+                        score = volume * abs(change_rate) * price_factor
+                        
+                        active_stocks.append({
+                            'stock_code': stock_code,
+                            'stock_name': stock_name,
+                            'current_price': current_price,
+                            'volume': volume,
+                            'change_rate': change_rate,
+                            'score': score
+                        })
+                        
+                except (ValueError, TypeError) as e:
+                    logger.debug(f"Error parsing stock data: {e}")
+                    continue
+            
+            # 점수 순으로 정렬
+            active_stocks.sort(key=lambda x: x['score'], reverse=True)
+            logger.info(f"Found {len(active_stocks)} active stocks after filtering")
+            
+            return active_stocks[:10]  # 상위 10개만 반환
+            
+        except Exception as e:
+            logger.error(f"Error getting active stocks: {e}")
+            return []
+    
     async def get_websocket_approval_key(self):
         """WebSocket 접속키 발급"""
         url = f"{self.base_url}/oauth2/Approval"
@@ -261,6 +382,62 @@ class KISAPIClient:
             await self.websocket.send(json.dumps(subscribe_data))
             logger.info(f"Subscribed to real-time price for {stock_code}")
     
+    def _parse_realtime_data(self, data_str: str) -> Dict:
+        """실시간 파이프 구분 데이터 파싱"""
+        try:
+            parts = data_str.split('|')
+            if len(parts) < 4:
+                return None
+                
+            compress_flag = parts[0]
+            tr_id = parts[1]
+            seq = parts[2]
+            data_part = parts[3]
+            
+            # H0STCNT0 (주식 현재가) 데이터 파싱
+            if tr_id == "H0STCNT0":
+                fields = data_part.split('^')
+                if len(fields) >= 15:
+                    def safe_int(value, default=0):
+                        try:
+                            return int(value) if value and value != '' else default
+                        except ValueError:
+                            return default
+                    
+                    def safe_float(value, default=0.0):
+                        try:
+                            return float(value) if value and value != '' else default
+                        except ValueError:
+                            return default
+                    
+                    return {
+                        "tr_id": tr_id,
+                        "stock_code": fields[0],
+                        "time": fields[1],
+                        "current_price": safe_int(fields[2]),
+                        "change": safe_int(fields[4]),
+                        "change_rate": safe_float(fields[5]),
+                        "volume": safe_int(fields[12]),
+                        "trade_value": safe_int(fields[13]),
+                        "bid_price": safe_int(fields[7]),
+                        "ask_price": safe_int(fields[8]),
+                        "high_price": safe_int(fields[9]),
+                        "low_price": safe_int(fields[10]),
+                        "prev_close": safe_int(fields[11])
+                    }
+            
+            # 다른 TR_ID도 필요시 추가
+            return {
+                "tr_id": tr_id,
+                "raw_data": data_part,
+                "compress_flag": compress_flag,
+                "seq": seq
+            }
+            
+        except Exception as e:
+            logger.error(f"Failed to parse realtime data: {e}")
+            return None
+
     async def listen_websocket(self, callback):
         """WebSocket 메시지 수신"""
         if not self.websocket:
@@ -276,10 +453,34 @@ class KISAPIClient:
                 logger.debug(f"Message type: {type(message)}, length: {len(message) if message else 0}")
                 
                 if message:
-                    logger.debug(f"Raw message (first 200 chars): {str(message)[:200]}...")
+                    logger.debug(f"Raw message (first 200 chars): {str(message)}...")
                 
+                # 빈 메시지나 ping/pong 메시지 무시
+                if not message or message in ['ping', 'pong']:
+                    logger.debug(f"Ignoring empty or ping/pong message #{message_count}")
+                    continue
+                
+                # 여러 JSON 객체가 연결된 경우 처리
+                message_str = str(message).strip()
+                if message_str.count('{') > 1:
+                    logger.debug(f"Message contains multiple JSON objects, processing first one")
+                    # 첫 번째 완전한 JSON 객체만 추출
+                    brace_count = 0
+                    first_json_end = 0
+                    for i, char in enumerate(message_str):
+                        if char == '{':
+                            brace_count += 1
+                        elif char == '}':
+                            brace_count -= 1
+                            if brace_count == 0:
+                                first_json_end = i + 1
+                                break
+                    if first_json_end > 0:
+                        message_str = message_str[:first_json_end]
+                
+                # JSON 메시지 처리 시도
                 try:
-                    data = json.loads(message)
+                    data = json.loads(message_str)
                     logger.debug(f"Parsed JSON data keys: {list(data.keys()) if isinstance(data, dict) else 'Not a dict'}")
                     
                     # 구독 성공 메시지에서 암호화 키 저장
@@ -290,9 +491,11 @@ class KISAPIClient:
                             self.encryption_iv = output['iv']
                             logger.info("Encryption key/iv obtained from subscribe success message")
                             logger.debug(f"Key: {self.encryption_key}, IV: {self.encryption_iv}")
+                        # 구독 성공 메시지는 콜백 호출하지 않음
+                        continue
                     
                     # 암호화된 실시간 데이터 처리
-                    if isinstance(data, dict) and data.get('header', {}).get('encrypt') == 'Y':
+                    elif isinstance(data, dict) and data.get('header', {}).get('encrypt') == 'Y':
                         logger.debug("Received encrypted real-time data")
                         if 'body' in data and isinstance(data['body'], str):
                             decrypted_body = self.decrypt_data(data['body'])
@@ -302,11 +505,24 @@ class KISAPIClient:
                             except json.JSONDecodeError:
                                 logger.warning("Failed to parse decrypted data as JSON")
                     
-                    logger.info(f"Processing WebSocket message #{message_count}")
-                    await callback(data)
-                except json.JSONDecodeError as e:
-                    logger.warning(f"Failed to decode WebSocket message #{message_count}: {e}")
-                    logger.debug(f"Invalid JSON message: {message[:100]}...")
+                    # 유의미한 데이터만 콜백 처리
+                    if isinstance(data, dict) and ('header' in data or 'body' in data):
+                        logger.info(f"Processing JSON WebSocket message #{message_count}")
+                        await callback(data)
+                        
+                except json.JSONDecodeError:
+                    # JSON이 아닌 경우 파이프 구분 데이터 파싱 시도
+                    if '|' in message_str:
+                        logger.debug(f"Attempting to parse pipe-separated data #{message_count}")
+                        parsed_data = self._parse_realtime_data(message_str)
+                        if parsed_data:
+                            logger.info(f"Processing realtime data for {parsed_data.get('stock_code', 'unknown')}: {parsed_data.get('current_price', 0)}")
+                            await callback(parsed_data)
+                        else:
+                            logger.debug(f"Failed to parse realtime data #{message_count}")
+                    else:
+                        logger.debug(f"Skipping non-JSON/non-pipe message #{message_count}: {message_str[:50]}...")
+                        
                 except Exception as e:
                     logger.error(f"Error processing WebSocket message #{message_count}: {e}")
                     

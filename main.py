@@ -2,9 +2,10 @@ import asyncio
 import os
 import logging
 from dotenv import load_dotenv
-from api_client import KISAPIClient
-from trader import AutoTrader
-from utils import TradingConfig, setup_logging, create_trades_csv_if_not_exists, send_telegram_message
+from typing import List
+from src.api import KISAPIClient
+from src.trading import AutoTrader
+from src.utils import TradingConfig, setup_logging, create_trades_csv_if_not_exists, send_telegram_message
 
 async def main():
     # 환경 변수 로드
@@ -70,16 +71,19 @@ async def main():
 async def setup_websocket(api_client: KISAPIClient, trader: AutoTrader, config: TradingConfig):
     """WebSocket 설정 및 실시간 데이터 처리"""
     logger = logging.getLogger(__name__)
+    current_subscribed_stocks = []
     
     try:
         # WebSocket 연결 (approval key 자동 획득)
         await api_client.connect_websocket()
         
-        # 실시간 현재가 구독
+        # 초기 구독
         await api_client.subscribe_realtime_price(trader.target_stocks)
+        current_subscribed_stocks = trader.target_stocks.copy()
+        logger.info(f"📡 Initial WebSocket subscription: {current_subscribed_stocks}")
         
-        # 실시간 데이터 수신 및 처리
-        await api_client.listen_websocket(trader.process_realtime_data)
+        # 실시간 데이터 수신 및 처리 (동적 재구독 포함)
+        await listen_with_resubscription(api_client, trader, current_subscribed_stocks)
         
     except Exception as e:
         logger.error(f"WebSocket error: {e}")
@@ -88,6 +92,31 @@ async def setup_websocket(api_client: KISAPIClient, trader: AutoTrader, config: 
         # 재연결 시도
         await asyncio.sleep(5)
         await setup_websocket(api_client, trader, config)
+
+async def listen_with_resubscription(api_client: KISAPIClient, trader: AutoTrader, current_subscribed_stocks: List[str]):
+    """WebSocket 리스닝 + 동적 재구독"""
+    logger = logging.getLogger(__name__)
+    
+    async def data_callback(data):
+        # 데이터 처리
+        await trader.process_realtime_data(data)
+        
+        # 재구독 체크
+        if getattr(trader, 'need_resubscribe', False):
+            if set(trader.target_stocks) != set(current_subscribed_stocks):
+                logger.info(f"🔄 Re-subscribing WebSocket for new targets: {trader.target_stocks}")
+                try:
+                    await api_client.subscribe_realtime_price(trader.target_stocks)
+                    current_subscribed_stocks.clear()
+                    current_subscribed_stocks.extend(trader.target_stocks)
+                    logger.info(f"✅ WebSocket re-subscription successful")
+                except Exception as e:
+                    logger.error(f"❌ WebSocket re-subscription failed: {e}")
+                
+                trader.need_resubscribe = False
+    
+    # 실시간 데이터 수신
+    await api_client.listen_websocket(data_callback)
 
 async def test_api_connection():
     """API 연결 테스트 함수"""
