@@ -48,10 +48,22 @@ class DynamicStockSelector:
             
             # 먼저 거래량 순위 조회
             logger.info("📊 Fetching volume ranking data...")
-            volume_data = await self.api_client.get_volume_ranking()
-            
-            if not volume_data or volume_data.get('rt_cd') != '0':
-                logger.error("Failed to get volume ranking data")
+            try:
+                volume_data = await self.api_client.get_volume_ranking()
+                logger.debug(f"Volume ranking response: {volume_data}")
+                
+                if not volume_data:
+                    logger.error("Volume ranking data is None")
+                    return ["005930", "000660", "035420"]  # 기본 종목들
+                    
+                if volume_data.get('rt_cd') != '0':
+                    logger.error(f"Volume ranking API failed: rt_cd={volume_data.get('rt_cd')}, msg={volume_data.get('msg1', 'Unknown error')}")
+                    return ["005930", "000660", "035420"]  # 기본 종목들
+                    
+            except Exception as e:
+                logger.error(f"Exception during volume ranking fetch: {e}")
+                import traceback
+                logger.error(f"Traceback: {traceback.format_exc()}")
                 return ["005930", "000660", "035420"]  # 기본 종목들
             
             logger.info(f"📈 Volume ranking received: {len(volume_data.get('output', []))} stocks")

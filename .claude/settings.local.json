@@ -4,7 +4,9 @@
       "Bash(pip install:*)",
       "Bash(copy .env.example .env)",
       "Bash(python:*)",
-      "Bash(dir:*)"
+      "Bash(dir:*)",
+      "WebSearch",
+      "Bash(copy:*)"
     ],
     "deny": [],
     "ask": []

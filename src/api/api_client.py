@@ -111,7 +111,11 @@ class KISAPIClient:
                     return await response.json()
     
     async def get_current_price(self, stock_code: str) -> Dict:
-        """현재가 조회"""
+        """현재가 조회 (스로틀링 적용)"""
+        # API 호출 제한 적용
+        from ..utils.api_throttler import throttler
+        await throttler.throttle()
+        
         url = f"{self.base_url}/uapi/domestic-stock/v1/quotations/inquire-price"
         headers = self._get_headers("FHKST01010100")
         params = {
@@ -133,7 +137,11 @@ class KISAPIClient:
         return await self._request("GET", url, headers, params)
     
     async def place_order(self, stock_code: str, order_type: str, quantity: int, price: int = 0) -> Dict:
-        """주문 실행"""
+        """주문 실행 (스로틀링 적용)"""
+        # API 호출 제한 적용
+        from ..utils.api_throttler import throttler
+        await throttler.throttle()
+        
         url = f"{self.base_url}/uapi/domestic-stock/v1/trading/order-cash"
         
         tr_id = "VTTC0802U" if order_type == "buy" else "VTTC0801U"  # 모의투자
@@ -157,7 +165,11 @@ class KISAPIClient:
         return await self._request("POST", url, headers, data)
     
     async def get_balance(self) -> Dict:
-        """잔고 조회"""
+        """잔고 조회 (스로틀링 적용)"""
+        # API 호출 제한 적용
+        from ..utils.api_throttler import throttler
+        await throttler.throttle()
+        
         url = f"{self.base_url}/uapi/domestic-stock/v1/trading/inquire-balance"
         headers = self._get_headers("VTTC8434R" if self.is_demo else "TTTC8434R")
         
@@ -195,21 +207,75 @@ class KISAPIClient:
         return await self._request("GET", url, headers, params)
     
     async def get_volume_ranking(self, market: str = "J", sort: str = "1", count: int = 30) -> Dict:
-        """거래량 순위 조회"""
-        url = f"{self.base_url}/uapi/domestic-stock/v1/quotations/volume-rank"
-        headers = self._get_headers("FHPST01710000")
+        """거래량 순위 조회 (스로틀링 적용)"""
+        try:
+            # API 호출 제한 적용
+            from ..utils.api_throttler import throttler
+            await throttler.throttle()
+            
+            url = f"{self.base_url}/uapi/domestic-stock/v1/quotations/volume-rank"
+            headers = self._get_headers("FHPST01710000")
+            params = {
+                "fid_cond_mrkt_div_code": market,  # J: 코스피+코스닥, 0: 코스피, 1: 코스닥
+                "fid_cond_scr_div_code": "20171",
+                "fid_input_iscd": "0000",
+                "fid_div_cls_code": "0",
+                "fid_blng_cls_code": "0",
+                "fid_trgt_cls_code": "111111111",
+                "fid_trgt_exls_cls_code": "000000",
+                "fid_input_price_1": "",
+                "fid_input_price_2": "",
+                "fid_vol_cnt": "",
+                "fid_input_date_1": ""
+            }
+            
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.debug(f"Volume ranking request: URL={url}")
+            result = await self._request("GET", url, headers, params)
+            
+            if result.get('rt_cd') == '1':
+                logger.warning(f"Volume ranking API 실패: {result.get('msg1', 'Unknown error')}")
+                
+            return result
+        except Exception as e:
+            import logging
+            import traceback
+            logger = logging.getLogger(__name__)
+            logger.error(f"Volume ranking API error: {e}")
+            logger.error(f"Traceback: {traceback.format_exc()}")
+            return {"rt_cd": "1", "msg1": f"API Error: {e}"}
+    
+    async def get_daily_price(self, stock_code: str, start_date: str, end_date: str) -> Dict:
+        """일봉 데이터 조회 (스로틀링 적용)"""
+        # API 호출 제한 적용
+        from ..utils.api_throttler import throttler
+        await throttler.throttle()
+        
+        url = f"{self.base_url}/uapi/domestic-stock/v1/quotations/inquire-daily-itemchartprice"
+        headers = self._get_headers("FHKST03010100")
         params = {
-            "fid_cond_mrkt_div_code": market,  # J: 코스피+코스닥, 0: 코스피, 1: 코스닥
-            "fid_cond_scr_div_code": "20171",
-            "fid_input_iscd": "0000",
-            "fid_div_cls_code": "0",
-            "fid_blng_cls_code": "0",
-            "fid_trgt_cls_code": "111111111",
-            "fid_trgt_exls_cls_code": "000000",
-            "fid_input_price_1": "",
-            "fid_input_price_2": "",
-            "fid_vol_cnt": "",
-            "fid_input_date_1": ""
+            "fid_cond_mrkt_div_code": "J",
+            "fid_input_iscd": stock_code,
+            "fid_input_date_1": start_date,
+            "fid_input_date_2": end_date,
+            "fid_period_div_code": "D",  # 일봉
+            "fid_org_adj_prc": "1"       # 수정주가
+        }
+        
+        return await self._request("GET", url, headers, params)
+    
+    async def get_index(self, index_code: str) -> Dict:
+        """지수 조회 (스로틀링 적용)"""
+        # API 호출 제한 적용
+        from ..utils.api_throttler import throttler
+        await throttler.throttle()
+        
+        url = f"{self.base_url}/uapi/domestic-stock/v1/quotations/inquire-index-price"
+        headers = self._get_headers("FHPKST03030100")
+        params = {
+            "fid_cond_mrkt_div_code": "U",
+            "fid_input_iscd": index_code
         }
         
         return await self._request("GET", url, headers, params)
