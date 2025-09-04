@@ -15,6 +15,7 @@ from ..analysis.market_analyzer import MarketAnalyzer
 from ..analysis.enhanced_signal_analyzer import EnhancedSignalAnalyzer
 from .risk_manager import RiskManager
 from .stop_loss_manager import StopLossManager
+from .trading_frequency_controller import TradingFrequencyController
 
 logger = logging.getLogger(__name__)
 
@@ -63,6 +64,9 @@ class AutoTrader:
         # 새로운 고급 분석 모듈 초기화
         self.market_analyzer = MarketAnalyzer()
         self.enhanced_signal = EnhancedSignalAnalyzer()
+        
+        # 거래 빈도 제어 모듈 초기화
+        self.frequency_controller = TradingFrequencyController()
         
         # 하이브리드 데이터 매니저 초기화 (SQLite + 메모리)
         self.hybrid_managers = {}  # {stock_code: HybridDataManager}
@@ -321,11 +325,29 @@ class AutoTrader:
                 logger.debug(f"⏳ Insufficient data for enhanced analysis: {stock_code} ({len(prices)}/10)")
                 return
             
-            # 3. 다중 지표 필터링을 통한 매수/매도 신호 평가
+            # 3. 강화된 다중 지표 분석 및 상세 로깅
             should_buy, buy_reason = self.enhanced_signal.should_buy(prices, volumes, market_condition)
             
-            logger.info(f"📊 Enhanced Analysis {stock_code} - {buy_reason}")
-            logger.info(f"📊 Data points: prices({len(prices)}), volumes({len(volumes)})")
+            # 상세 분석 결과 조회
+            analysis_summary = self.enhanced_signal.get_enhanced_analysis_summary(prices, volumes)
+            
+            logger.info(f"🔍 Enhanced Analysis {stock_code}:")
+            logger.info(f"  • 종합점수: {analysis_summary.get('overall_score', 0):.1f}/100 (최소:{self.enhanced_signal.min_signal_score})")
+            logger.info(f"  • 결과: {buy_reason}")
+            
+            # 세부 지표 로깅
+            indicators = analysis_summary.get('indicators', {})
+            risk_metrics = analysis_summary.get('risk_metrics', {})
+            logger.info(f"  • RSI: {indicators.get('rsi', 0):.1f}, 볼밴위치: {indicators.get('bb_position', 0)*100:.1f}%")
+            logger.info(f"  • 거래량비: {indicators.get('volume_ratio', 0):.1f}배, 변동성비: {risk_metrics.get('volatility_ratio', 0):.1f}배")
+            logger.info(f"  • 잠재수익: {risk_metrics.get('potential_return', 0):.2f}%")
+            
+            # 필터 통과 여부
+            filters_passed = []
+            if risk_metrics.get('meet_volume_threshold', False): filters_passed.append("거래량OK")
+            if risk_metrics.get('meet_volatility_threshold', True): filters_passed.append("변동성OK") 
+            if risk_metrics.get('meet_return_threshold', False): filters_passed.append("수익률OK")
+            logger.info(f"  • 필터통과: {', '.join(filters_passed) if filters_passed else '없음'}")
             
             # 4. 리스크 관리: 거래 가능 여부 확인
             can_trade, risk_reason = self.risk_manager.can_trade()
@@ -333,19 +355,29 @@ class AutoTrader:
                 logger.info(f"🚫 Trading blocked by risk manager: {risk_reason}")
                 return
             
-            # 5. 매수 신호 처리
+            # 5. 거래 빈도 제어: 매수 가능 여부 확인
+            quantity = self.risk_manager.calculate_position_size(current_price, stock_code)
+            can_buy, freq_reason = self.frequency_controller.can_buy_stock(stock_code, current_price, quantity)
+            if not can_buy:
+                logger.info(f"🚫 Trading blocked by frequency controller: {freq_reason}")
+                return
+            
+            # 6. 매수 신호 처리 (강화된 기준 적용)
             if should_buy:
-                logger.warning(f"🎯 ENHANCED BUY SIGNAL: {stock_code} - {buy_reason}")
-                await self._execute_buy_with_risk_management(stock_code, current_price, buy_reason)
-            else:
-                # 기존 간단한 로직도 백업으로 유지 (거래량 급증 시)
-                volume_surge = self.analyzer.detect_volume_surge(current_volume, volumes, surge_ratio=1.5)
-                if len(self.positions) == 0 and volume_surge and market_condition[0] not in ["급락", "고변동성"]:
-                    reason = f"백업매수신호-거래량급증"
-                    logger.warning(f"🔄 BACKUP BUY SIGNAL: {stock_code} - {reason}")
-                    await self._execute_buy_with_risk_management(stock_code, current_price, reason)
+                # 추가 검증: 분석 요약의 추천 결과도 확인
+                recommendation = analysis_summary.get('recommendation', 'HOLD')
+                if recommendation == 'BUY':
+                    logger.warning(f"🎯 ENHANCED BUY SIGNAL: {stock_code}")
+                    logger.warning(f"   📊 점수: {analysis_summary.get('overall_score', 0):.1f}/100")
+                    logger.warning(f"   💡 사유: {buy_reason}")
+                    await self._execute_buy_with_risk_management(stock_code, current_price, f"강화신호: {buy_reason}")
                 else:
-                    logger.debug(f"⏸️ No buy signal for {stock_code} - Enhanced analysis: {buy_reason}")
+                    logger.info(f"⚠️ 신호 불일치: should_buy=True but recommendation={recommendation}")
+            else:
+                logger.debug(f"❌ 매수 신호 없음: {stock_code} - {buy_reason}")
+                
+                # 백업 로직은 더 이상 사용하지 않음 (강화된 분석에 의존)
+                logger.debug(f"⏸️ 강화된 분석 기준으로 매수 신호 없음: {stock_code}")
         
         except Exception as e:
             logger.error(f"Enhanced analysis error for {stock_code}: {e}")
@@ -457,6 +489,9 @@ class AutoTrader:
                 # RiskManager에 거래 기록
                 self.risk_manager.record_trade(stock_code, "buy", quantity, price, reason)
                 
+                # 거래 빈도 제어에 거래 기록
+                self.frequency_controller.record_buy_trade(stock_code, price, quantity, reason)
+                
                 # 데이터 매니저에도 기록 (기존 호환성)
                 self.data_manager.save_trade_log(stock_code, "매수", price, quantity, reason, 0.0)
                 
@@ -555,6 +590,9 @@ class AutoTrader:
             if order_result and order_result.get('rt_cd') == '0':
                 # RiskManager에 거래 기록
                 self.risk_manager.record_trade(stock_code, "sell", position.quantity, price, reason, profit_amount, profit_rate)
+                
+                # 거래 빈도 제어에 매도 기록
+                self.frequency_controller.record_sell_trade(stock_code, price, position.quantity, position.avg_price, reason)
                 
                 # StopLossManager에서 포지션 제거
                 self.stop_loss_manager.remove_position(stock_code)
@@ -952,6 +990,12 @@ class AutoTrader:
                     # 리스크 관리 데이터 저장
                     self._save_risk_management_data()
                     
+                    # 거래 빈도 제어 일일 요약 출력
+                    freq_status = self.frequency_controller.get_trading_status()
+                    fee_analysis = self.frequency_controller.get_fee_analysis()
+                    logger.info(f"📊 거래 빈도 제어 일일 요약: {freq_status}")
+                    logger.info(f"💰 수수료 분석 일일 요약: {fee_analysis}")
+                    
                     break
                 
                 if not self.is_trading_time:
@@ -971,6 +1015,12 @@ class AutoTrader:
                     if self.positions:
                         summary = await self.get_positions_summary()
                         logger.info(summary)
+                    
+                    # 거래 빈도 제어 상태 로깅
+                    freq_status = self.frequency_controller.get_trading_status()
+                    daily_stats = freq_status.get('daily_stats', {})
+                    logger.info(f"🔄 거래 현황: 매수 {daily_stats.get('buy_count', 0)}/{daily_stats.get('max_daily_trades', 0)}회, "
+                               f"거래가능: {'✅' if daily_stats.get('can_trade', False) else '🚫'}")
                     
                     # 데이터 관리 (메모리 정리)
                     self.data_manager.clear_old_data()
