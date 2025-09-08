@@ -272,7 +272,7 @@ class KISAPIClient:
         await throttler.throttle()
         
         url = f"{self.base_url}/uapi/domestic-stock/v1/quotations/inquire-index-price"
-        headers = self._get_headers("FHPKST03030100")
+        headers = self._get_headers("FHKUP03500100")  # 지수시세 조회 API 코드로 변경
         params = {
             "fid_cond_mrkt_div_code": "U",
             "fid_input_iscd": index_code

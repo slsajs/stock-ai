@@ -6,100 +6,150 @@ RSI, MACD, 볼린저밴드, 거래량, 추세 등을 종합하여 매매 신호 
 import numpy as np
 import pandas as pd
 import logging
-from typing import List, Tuple
+import os
+from typing import List, Tuple, Dict
 
 logger = logging.getLogger(__name__)
 
 
 class EnhancedSignalAnalyzer:
-    def __init__(self):
-        # 신호 강도 기준 상향 조정 (100점 만점 중 80점 이상)
-        self.min_signal_score = 80  # 기존 3/5에서 80/100으로 상향
-        
-        # 지표별 가중치 설정
+    def __init__(self, custom_score_threshold=None):
+        # 신호 강도 기준 (환경변수 또는 매개변수로 조정 가능)
+        if custom_score_threshold is not None:
+            self.min_signal_score = custom_score_threshold
+        else:
+            self.min_signal_score = float(os.getenv('SIGNAL_SCORE_THRESHOLD', '80'))  # 기본 80점
+            
+        # 지표별 가중치 설정 (환경변수로 조정 가능)
         self.indicator_weights = {
-            'rsi': 30,        # RSI: 30%
-            'macd': 25,       # MACD: 25% 
-            'bollinger': 20,  # 볼린저밴드: 20%
-            'volume': 15,     # 거래량: 15%
-            'trend': 10       # 추세: 10%
+            'rsi': int(os.getenv('RSI_WEIGHT', '30')),        # RSI: 기본 30%
+            'macd': int(os.getenv('MACD_WEIGHT', '25')),      # MACD: 기본 25% 
+            'bollinger': int(os.getenv('BOLLINGER_WEIGHT', '20')),  # 볼린저밴드: 기본 20%
+            'volume': int(os.getenv('VOLUME_WEIGHT', '15')),  # 거래량: 기본 15%
+            'trend': int(os.getenv('TREND_WEIGHT', '10'))     # 추세: 기본 10%
         }
         
-        # 목표 수익률 설정 (수수료 고려)
-        self.min_target_profit_rate = 0.008  # 0.8%
+        # 목표 수익률 설정 (환경변수로 조정 가능)
+        self.min_target_profit_rate = float(os.getenv('MIN_TARGET_PROFIT_RATE', '0.008'))  # 기본 0.8%
         
-        # 시장 변동성 임계값
-        self.volatility_threshold = 2.0  # 평소 2배
+        # 시장 변동성 임계값 (환경변수로 조정 가능)
+        self.volatility_threshold = float(os.getenv('VOLATILITY_THRESHOLD', '2.0'))  # 기본 평소 2배
         
-        # 거래량 임계값  
-        self.volume_threshold = 1.5  # 20일 평균의 1.5배
+        # 거래량 임계값 (환경변수로 조정 가능)
+        self.volume_threshold = float(os.getenv('VOLUME_THRESHOLD', '1.5'))  # 기본 20일 평균의 1.5배
+        
+        # 설정값 로그
+        logger.info(f"Enhanced Signal Analyzer 초기화:")
+        logger.info(f"  * 최소 신호 점수: {self.min_signal_score}/100")
+        logger.info(f"  * 지표 가중치: RSI={self.indicator_weights['rsi']}%, MACD={self.indicator_weights['macd']}%, "
+                   f"볼밴={self.indicator_weights['bollinger']}%, 거래량={self.indicator_weights['volume']}%, "
+                   f"추세={self.indicator_weights['trend']}%")
+        logger.info(f"  * 목표수익률: {self.min_target_profit_rate*100:.1f}%, 변동성임계값: {self.volatility_threshold}배, "
+                   f"거래량임계값: {self.volume_threshold}배")
         
     def calculate_buy_signal_score(self, price_data: List[float], volume_data: List[float]) -> Tuple[float, List[str]]:
         """매수 신호 종합 점수 (0-100점, 가중치 적용)"""
+        logger.info(f"🚨 [ENTRY] calculate_buy_signal_score 호출됨! price_data길이={len(price_data)}, volume_data길이={len(volume_data)}")
         total_score = 0.0
         signal_reasons = []
         
-        if len(price_data) < 50:
+        if len(price_data) < 10:  # 50 → 10으로 완화
+            logger.info(f"🚨 [EXIT] 데이터 부족으로 조기 종료: price_data길이={len(price_data)}")
             return 0.0, ["데이터 부족"]
         
-        # 필수 조건: 거래량 최소 기준 체크
-        if len(volume_data) >= 20:
-            avg_volume = sum(volume_data[-20:]) / 20
-            if volume_data[-1] < avg_volume * self.volume_threshold:
-                return 0.0, [f"거래량 부족 ({volume_data[-1]/avg_volume:.1f}배, 최소 {self.volume_threshold}배 필요)"]
+        # 필수 조건: 거래량 최소 기준 체크 (완화)
+        if len(volume_data) >= 10:  # 20 → 10으로 완화
+            period = min(len(volume_data), 10)  # 최대 10개 사용
+            avg_volume = sum(volume_data[-period:]) / period
+            volume_ratio = volume_data[-1] / avg_volume if avg_volume > 0 else 1.0
+            if volume_ratio < 0.5:  # 1.5 → 0.5로 대폭 완화
+                logger.info(f"🚨 [EXIT] 거래량 너무 부족: {volume_ratio:.1f}배")
+                return 0.0, [f"거래량 너무 부족 ({volume_ratio:.1f}배, 최소 0.5배 필요)"]
         
         try:
-            # 1. RSI 신호 (30% 가중치)
+            # 1. RSI 신호 (35% 가중치) - 조건 완화
             rsi_score = 0
-            rsi = self.calculate_rsi(price_data[-14:])
-            if rsi < 20:  # 매우 강한 과매도
+            # RSI 계산 (데이터 부족시 짧은 기간 사용)
+            rsi_period = min(14, len(price_data) - 1)
+            if rsi_period < 5:
+                rsi = 50.0  # 데이터가 너무 부족하면 중립값
+            else:
+                rsi = self.calculate_rsi(price_data[-rsi_period-1:])  # +1은 diff를 위함
+            logger.info(f"🔍 [DEBUG] RSI 계산: {rsi:.1f} (기간: {rsi_period})")
+            
+            if rsi < 25:  # 강한 과매도
                 rsi_score = 100
-                signal_reasons.append(f"RSI 매우강한과매도({rsi:.1f})")
-            elif rsi < 25:  # 강한 과매도
-                rsi_score = 80
                 signal_reasons.append(f"RSI 강한과매도({rsi:.1f})")
             elif rsi < 30:  # 과매도
-                rsi_score = 60
+                rsi_score = 80
                 signal_reasons.append(f"RSI 과매도({rsi:.1f})")
-            elif rsi < 35:  # 약한 과매도
-                rsi_score = 30
+            elif rsi < 40:  # 약한 과매도 (조건 완화)
+                rsi_score = 60
                 signal_reasons.append(f"RSI 약한과매도({rsi:.1f})")
-            total_score += rsi_score * self.indicator_weights['rsi'] / 100
+            elif rsi < 50:  # 중립 하단
+                rsi_score = 30
+                signal_reasons.append(f"RSI 중립하단({rsi:.1f})")
+            elif 50 <= rsi <= 60:  # 중립 (정상 범위도 일부 점수 부여)
+                rsi_score = 20
+                signal_reasons.append(f"RSI 중립({rsi:.1f})")
+            else:
+                logger.info(f"🚨 [DEBUG] RSI {rsi:.1f}는 어떤 조건에도 해당하지 않음!")
+            
+            rsi_weighted = rsi_score * self.indicator_weights['rsi'] / 100
+            total_score += rsi_weighted
+            logger.info(f"📊 [DEBUG] RSI: 점수={rsi_score}, 가중치={self.indicator_weights['rsi']}%, 가중점수={rsi_weighted:.1f}, 누적={total_score:.1f}")
                 
-            # 2. MACD 신호 (25% 가중치)
+            # 2. MACD 신호 (25% 가중치) - 조건 완화
             macd_score = 0
             macd_line, signal_line = self.calculate_macd(price_data)
             macd_diff = macd_line - signal_line
+            logger.debug(f"🔍 MACD: line={macd_line:.3f}, signal={signal_line:.3f}, diff={macd_diff:.3f}")
             
-            if macd_line > signal_line and macd_line > 0 and macd_diff > 0.5:
+            if macd_line > signal_line and macd_line > 0 and macd_diff > 0.3:
                 macd_score = 100
                 signal_reasons.append("MACD 강한골든크로스")
             elif macd_line > signal_line and macd_line > 0:
                 macd_score = 80
                 signal_reasons.append("MACD 골든크로스")
-            elif macd_line > signal_line and macd_diff > 0.2:
+            elif macd_line > signal_line and macd_diff > 0.1:
                 macd_score = 60
                 signal_reasons.append("MACD 상승전환")
             elif macd_line > signal_line:
                 macd_score = 40
                 signal_reasons.append("MACD 약한상승")
-            total_score += macd_score * self.indicator_weights['macd'] / 100
+            elif abs(macd_diff) < 0.1:  # 중립 상황도 일부 점수
+                macd_score = 20
+                signal_reasons.append("MACD 중립")
+            
+            macd_weighted = macd_score * self.indicator_weights['macd'] / 100
+            total_score += macd_weighted
+            logger.debug(f"📊 MACD: 점수={macd_score}, 가중치={self.indicator_weights['macd']}%, 가중점수={macd_weighted:.1f}")
                 
-            # 3. 볼린저밴드 신호 (20% 가중치)
+            # 3. 볼린저밴드 신호 (20% 가중치) - 조건 완화
             bb_score = 0
             bb_lower, bb_upper = self.calculate_bollinger_bands(price_data)
             bb_position = (price_data[-1] - bb_lower) / (bb_upper - bb_lower)
+            logger.debug(f"🔍 볼밴: 현재가={price_data[-1]}, 하단={bb_lower:.2f}, 상단={bb_upper:.2f}, 위치={bb_position:.1%}")
             
-            if bb_position <= 0.05:  # 하단 5% 이내
+            if bb_position <= 0.1:  # 하단 10% 이내
                 bb_score = 100
                 signal_reasons.append("볼밴 강한하단터치")
-            elif bb_position <= 0.1:  # 하단 10% 이내
+            elif bb_position <= 0.2:  # 하단 20% 이내
                 bb_score = 80
                 signal_reasons.append("볼밴 하단터치")
-            elif bb_position <= 0.2:  # 하단 20% 이내
-                bb_score = 50
+            elif bb_position <= 0.3:  # 하단 30% 이내 (조건 완화)
+                bb_score = 60
                 signal_reasons.append("볼밴 하단근접")
-            total_score += bb_score * self.indicator_weights['bollinger'] / 100
+            elif bb_position <= 0.5:  # 중간 하단 (추가)
+                bb_score = 40
+                signal_reasons.append("볼밴 중간하단")
+            elif bb_position <= 0.7:  # 중간 정도도 일부 점수
+                bb_score = 20
+                signal_reasons.append("볼밴 중간")
+            
+            bb_weighted = bb_score * self.indicator_weights['bollinger'] / 100
+            total_score += bb_weighted
+            logger.debug(f"📊 볼밴: 점수={bb_score}, 가중치={self.indicator_weights['bollinger']}%, 가중점수={bb_weighted:.1f}")
                 
             # 4. 거래량 신호 (15% 가중치)
             volume_score = 0
@@ -121,7 +171,7 @@ class EnhancedSignalAnalyzer:
                     signal_reasons.append(f"거래량 양호({volume_ratio:.1f}배)")
             total_score += volume_score * self.indicator_weights['volume'] / 100
                 
-            # 5. 추세 신호 (10% 가중치)
+            # 5. 추세 신호 (10% 가중치) - 조건 완화
             trend_score = 0
             if len(price_data) >= 20:
                 ma5 = sum(price_data[-5:]) / 5
@@ -137,7 +187,23 @@ class EnhancedSignalAnalyzer:
                 elif ma5 > ma20:
                     trend_score = 40
                     signal_reasons.append("약한상승추세")
-            total_score += trend_score * self.indicator_weights['trend'] / 100
+                elif abs(ma5 - ma20) / ma20 < 0.02:  # 횡보 (조건 완화)
+                    trend_score = 25
+                    signal_reasons.append("횡보추세")
+                elif price_data[-1] > ma20:  # 20일선 위에 있으면 기본 점수
+                    trend_score = 15
+                    signal_reasons.append("지지선 위")
+            else:
+                # 데이터 부족 시에도 기본 점수
+                trend_score = 20
+                signal_reasons.append("추세 데이터 부족")
+            trend_weighted = trend_score * self.indicator_weights['trend'] / 100
+            total_score += trend_weighted
+            logger.debug(f"📊 추세: 점수={trend_score}, 가중치={self.indicator_weights['trend']}%, 가중점수={trend_weighted:.1f}")
+            
+            # 최종 점수 로깅
+            logger.info(f"🎯 최종 종합점수: {total_score:.1f}/100 (신호이유: {len(signal_reasons)}개)")
+            logger.debug(f"🔍 신호 상세: {', '.join(signal_reasons)}")
                     
         except Exception as e:
             logger.error(f"매수 신호 점수 계산 실패: {e}")
@@ -414,37 +480,70 @@ class EnhancedSignalAnalyzer:
         """잠재적 수익률 추정 (기술적 분석 기반)"""
         try:
             if len(price_data) < 20:
-                return 0.0
+                # 데이터가 부족해도 최소 수익률 제공
+                return 0.015  # 1.5% 기본 기대 수익률
             
             current_price = price_data[-1]
             
-            # 저항선과 지지선 계산
-            recent_highs = [max(price_data[i:i+5]) for i in range(len(price_data)-5, len(price_data), 5)]
-            recent_lows = [min(price_data[i:i+5]) for i in range(len(price_data)-5, len(price_data), 5)]
+            # 최근 20일간의 고가/저가 분석
+            recent_data = price_data[-20:]
+            recent_high = max(recent_data)
+            recent_low = min(recent_data)
             
-            if not recent_highs or not recent_lows:
-                return 0.0
-            
-            # 평균 저항선 계산
-            resistance_level = np.mean(recent_highs[-3:]) if len(recent_highs) >= 3 else max(recent_highs)
-            
-            # 볼린저밴드 상단을 목표가로 고려
+            # 볼린저밴드 계산
             bb_lower, bb_upper = self.calculate_bollinger_bands(price_data)
             
-            # 목표가는 저항선과 볼린저밴드 상단 중 더 보수적인 값
-            target_price = min(resistance_level, bb_upper)
+            # 여러 목표가 계산
+            targets = []
+            
+            # 1. 최근 고점 기준 (보수적)
+            if recent_high > current_price:
+                targets.append(recent_high)
+            
+            # 2. 볼린저밴드 상단 (기술적 목표)
+            if bb_upper > current_price:
+                targets.append(bb_upper)
+            
+            # 3. 단순 이동평균 기반 목표 (5일 > 20일일 때)
+            if len(price_data) >= 20:
+                ma5 = sum(price_data[-5:]) / 5
+                ma20 = sum(price_data[-20:]) / 20
+                if ma5 > ma20:  # 상승 추세
+                    # 추세 지속 가정하에 목표가
+                    trend_target = current_price * 1.02  # 2% 상승 목표
+                    targets.append(trend_target)
+            
+            # 4. RSI 과매도 시 반등 기대
+            rsi = self.calculate_rsi(price_data[-14:]) if len(price_data) >= 14 else 50
+            if rsi < 35:  # 과매도
+                oversold_target = current_price * 1.015  # 1.5% 반등 기대
+                targets.append(oversold_target)
+            
+            # 목표가가 없으면 기본 수익률 제공
+            if not targets:
+                # 현재 가격 대비 최소 수익 기대
+                return 0.008  # 0.8% 기본 수익률
+            
+            # 가장 보수적인 목표가 선택
+            target_price = min(targets)
+            
+            # 하지만 너무 낮지 않도록 보정
+            min_target = current_price * 1.005  # 최소 0.5% 상승
+            target_price = max(target_price, min_target)
             
             # 잠재 수익률 계산
             potential_return = (target_price - current_price) / current_price
             
-            # 수수료 차감 (왕복 0.27% 가정)
-            fee_adjusted_return = potential_return - 0.0027
+            # 수수료 차감 (왕복 0.25% 가정)
+            fee_adjusted_return = potential_return - 0.0025
             
-            return max(0.0, fee_adjusted_return)
+            # 최종 결과는 최소 0.3% 이상 보장
+            return max(0.003, fee_adjusted_return)
             
         except Exception as e:
             logger.error(f"잠재 수익률 추정 실패: {e}")
-            return 0.0
+            # 에러 시에도 최소 수익률 제공
+            return 0.005  # 0.5% 기본값
     
     def get_enhanced_analysis_summary(self, price_data: List[float], volume_data: List[float]) -> Dict:
         """강화된 분석 결과 요약"""

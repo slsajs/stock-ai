@@ -6,7 +6,9 @@
       "Bash(python:*)",
       "Bash(dir:*)",
       "WebSearch",
-      "Bash(copy:*)"
+      "Bash(copy:*)",
+      "WebFetch(domain:github.com)",
+      "Bash(timeout:*)"
     ],
     "deny": [],
     "ask": []

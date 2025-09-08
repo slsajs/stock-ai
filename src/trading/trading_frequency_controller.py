@@ -47,7 +47,7 @@ class TradingFrequencyController:
         self.max_daily_trades_per_stock = 3  # 종목당 일일 최대 거래 횟수
         self.consecutive_loss_limit = 2  # 연속 손실 한계
         self.loss_cooldown_hours = 1  # 연속 손실 시 거래 중단 시간 (시간)
-        self.min_profit_vs_fee_ratio = 4.0  # 최소 수익 vs 수수료 비율
+        self.min_profit_vs_fee_ratio = 2.0  # 최소 수익 vs 수수료 비율 (완화)
         
         # 수수료 설정 (한국투자증권 기준)
         self.buy_fee_rate = 0.00015  # 0.015% (최소 1원)
@@ -97,7 +97,7 @@ class TradingFrequencyController:
             min_exit_price = expected_profit['min_exit_price']
             profit_potential = (min_exit_price - expected_price) / expected_price * 100
             
-            if profit_potential < 0.5:  # 최소 0.5% 수익 잠재력 필요
+            if profit_potential < 0.1:  # 최소 0.1% 수익 잠재력 필요 (완화)
                 return False, f"수익 잠재력 부족 (최소 {min_exit_price:,.0f}원 필요, 현재 {expected_price:,.0f}원)"
             
             return True, f"매수 가능 (일일거래: {today_trades+1}/{self.max_daily_trades}, " \

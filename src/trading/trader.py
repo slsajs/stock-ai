@@ -62,7 +62,7 @@ class AutoTrader:
         self.data_manager = DataManager(max_data_points=100)
         
         # 새로운 고급 분석 모듈 초기화
-        self.market_analyzer = MarketAnalyzer()
+        self.market_analyzer = MarketAnalyzer(api_client=self.api)
         self.enhanced_signal = EnhancedSignalAnalyzer()
         
         # 거래 빈도 제어 모듈 초기화
@@ -314,7 +314,7 @@ class AutoTrader:
                 return  # 포지션 보유 중이면 신규 진입 안함
             
             # 1. 시장 상황 분석
-            market_condition = self.market_analyzer.get_market_condition()
+            market_condition = await self.market_analyzer.get_market_condition_async()
             logger.info(f"📊 Market condition: {market_condition[0]} - {market_condition[1]}")
             
             # 2. 신규 진입 신호 분석 - 데이터 준비
@@ -429,7 +429,7 @@ class AutoTrader:
         # 2. 다중 지표 기반 매도 신호 확인
         prices = self.data_manager.get_recent_prices(stock_code)
         volumes = self.data_manager.get_recent_volumes(stock_code)
-        market_condition = self.market_analyzer.get_market_condition()
+        market_condition = await self.market_analyzer.get_market_condition_async()
         
         if len(prices) >= 20:  # 충분한 데이터가 있을 때만 다중지표 분석
             should_sell, sell_reason = self.enhanced_signal.should_sell(prices, volumes, market_condition)

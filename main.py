@@ -5,7 +5,7 @@ from dotenv import load_dotenv
 from typing import List
 from src.api import KISAPIClient
 from src.trading import AutoTrader
-from src.utils import TradingConfig, setup_logging, create_trades_csv_if_not_exists, send_telegram_message
+from src.utils import TradingConfig, setup_logging, create_trades_csv_if_not_exists  # , send_telegram_message
 
 async def main():
     # 환경 변수 로드
@@ -45,7 +45,7 @@ async def main():
     try:
         async with api_client:
             logger.info("KIS API Stock Trading System Started")
-            await send_telegram_message("주식 자동매매 시스템이 시작되었습니다.", config)
+            # await send_telegram_message("주식 자동매매 시스템이 시작되었습니다.", config)
             
             # WebSocket 연결 및 실시간 데이터 수신을 위한 태스크들
             tasks = []
@@ -63,10 +63,10 @@ async def main():
             
     except KeyboardInterrupt:
         logger.info("System stopped by user")
-        await send_telegram_message("주식 자동매매 시스템이 사용자에 의해 중지되었습니다.", config)
+        # await send_telegram_message("주식 자동매매 시스템이 사용자에 의해 중지되었습니다.", config)
     except Exception as e:
         logger.error(f"System error: {e}")
-        await send_telegram_message(f"시스템 오류가 발생했습니다: {e}", config)
+        # await send_telegram_message(f"시스템 오류가 발생했습니다: {e}", config)
 
 async def setup_websocket(api_client: KISAPIClient, trader: AutoTrader, config: TradingConfig):
     """WebSocket 설정 및 실시간 데이터 처리"""
@@ -87,7 +87,7 @@ async def setup_websocket(api_client: KISAPIClient, trader: AutoTrader, config: 
         
     except Exception as e:
         logger.error(f"WebSocket error: {e}")
-        await send_telegram_message(f"WebSocket 연결 오류: {e}", config)
+        # await send_telegram_message(f"WebSocket 연결 오류: {e}", config)
         
         # 재연결 시도
         await asyncio.sleep(5)
@@ -156,8 +156,51 @@ async def test_api_connection():
 
 if __name__ == "__main__":
     import sys
+    import argparse
     
-    if len(sys.argv) > 1 and sys.argv[1] == "test":
+    # 명령줄 인자 파싱
+    parser = argparse.ArgumentParser(description='Stock Trading System')
+    parser.add_argument('command', nargs='?', default='run', help='Commands: run, test')
+    parser.add_argument('--score', type=int, help='Set minimum signal score threshold (default: 80)')
+    parser.add_argument('--rsi-weight', type=int, help='RSI weight percentage (default: 30)')
+    parser.add_argument('--macd-weight', type=int, help='MACD weight percentage (default: 25)')
+    parser.add_argument('--bollinger-weight', type=int, help='Bollinger weight percentage (default: 20)')
+    parser.add_argument('--volume-weight', type=int, help='Volume weight percentage (default: 15)')
+    parser.add_argument('--trend-weight', type=int, help='Trend weight percentage (default: 10)')
+    parser.add_argument('--min-profit', type=float, help='Minimum target profit rate (default: 0.008 = 0.8%%)')
+    
+    args = parser.parse_args()
+    
+    # 환경변수 설정 (명령줄 인자가 있으면 덮어쓰기)
+    if args.score is not None:
+        os.environ['SIGNAL_SCORE_THRESHOLD'] = str(args.score)
+        print(f"신호 점수 임계값을 {args.score}점으로 설정")
+    
+    if args.rsi_weight is not None:
+        os.environ['RSI_WEIGHT'] = str(args.rsi_weight)
+        print(f"RSI 가중치를 {args.rsi_weight}%로 설정")
+    
+    if args.macd_weight is not None:
+        os.environ['MACD_WEIGHT'] = str(args.macd_weight)
+        print(f"MACD 가중치를 {args.macd_weight}%로 설정")
+    
+    if args.bollinger_weight is not None:
+        os.environ['BOLLINGER_WEIGHT'] = str(args.bollinger_weight)
+        print(f"볼린저밴드 가중치를 {args.bollinger_weight}%로 설정")
+    
+    if args.volume_weight is not None:
+        os.environ['VOLUME_WEIGHT'] = str(args.volume_weight)
+        print(f"거래량 가중치를 {args.volume_weight}%로 설정")
+    
+    if args.trend_weight is not None:
+        os.environ['TREND_WEIGHT'] = str(args.trend_weight)
+        print(f"추세 가중치를 {args.trend_weight}%로 설정")
+    
+    if args.min_profit is not None:
+        os.environ['MIN_TARGET_PROFIT_RATE'] = str(args.min_profit)
+        print(f"최소 목표 수익률을 {args.min_profit*100:.1f}%로 설정")
+    
+    if args.command == "test":
         # 테스트 모드
         asyncio.run(test_api_connection())
     else:
