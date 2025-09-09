@@ -128,8 +128,15 @@ class EnhancedSignalAnalyzer:
             # 3. 볼린저밴드 신호 (20% 가중치) - 조건 완화
             bb_score = 0
             bb_lower, bb_upper = self.calculate_bollinger_bands(price_data)
-            bb_position = (price_data[-1] - bb_lower) / (bb_upper - bb_lower)
-            logger.debug(f"🔍 볼밴: 현재가={price_data[-1]}, 하단={bb_lower:.2f}, 상단={bb_upper:.2f}, 위치={bb_position:.1%}")
+            
+            # 0으로 나누기 방지
+            bb_width = bb_upper - bb_lower
+            if bb_width > 0:
+                bb_position = (price_data[-1] - bb_lower) / bb_width
+                logger.debug(f"🔍 볼밴: 현재가={price_data[-1]}, 하단={bb_lower:.2f}, 상단={bb_upper:.2f}, 위치={bb_position:.1%}")
+            else:
+                bb_position = 0.5  # 변동성이 없으면 중간값으로 설정
+                logger.debug(f"🔍 볼밴: 현재가={price_data[-1]}, 하단={bb_lower:.2f}, 상단={bb_upper:.2f}, 위치=중간(변동성없음)")
             
             if bb_position <= 0.1:  # 하단 10% 이내
                 bb_score = 100

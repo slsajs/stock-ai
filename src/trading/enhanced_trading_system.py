@@ -128,8 +128,9 @@ class EnhancedTradingSystem:
                 exit_signal = self.stop_manager.check_exit_signal(symbol, current_price)
                 
                 if exit_signal:
-                    exit_price, exit_reason = exit_signal
-                    positions_to_exit.append((symbol, exit_price, exit_reason))
+                    exit_type, exit_reason, exit_info = exit_signal
+                    exit_price = current_price  # 현재 가격으로 매도
+                    positions_to_exit.append((symbol, exit_price, f"{exit_type}: {exit_reason}"))
                     
             except Exception as e:
                 self.logger.error(f"포지션 관리 오류 ({symbol}): {e}")

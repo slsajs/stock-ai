@@ -8,7 +8,9 @@
       "WebSearch",
       "Bash(copy:*)",
       "WebFetch(domain:github.com)",
-      "Bash(timeout:*)"
+      "Bash(timeout:*)",
+      "WebFetch(domain:apiportal.koreainvestment.com)",
+      "WebFetch(domain:hky035.github.io)"
     ],
     "deny": [],
     "ask": []

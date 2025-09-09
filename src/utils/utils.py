@@ -15,6 +15,19 @@ except ImportError:
     TELEGRAM_AVAILABLE = False
 
 @dataclass
+class MarketAnalysisConfig:
+    use_etf_for_index: bool = True
+    kospi_etf_code: str = "122630"  # KODEX 코스피
+    kosdaq_etf_code: str = "233740"  # KODEX 코스닥150
+    crash_threshold: float = -2.0
+    strong_bullish_threshold: float = 1.5
+    weak_bearish_threshold: float = -1.0
+    high_volatility_threshold: float = 35.0
+    cache_duration_minutes: int = 10
+    api_timeout_seconds: int = 30
+    fallback_cache_hours: int = 2
+
+@dataclass
 class TradingConfig:
     max_positions: int = 3
     stop_loss_pct: float = -3.0
@@ -24,6 +37,11 @@ class TradingConfig:
     volume_multiplier: float = 3.0
     telegram_bot_token: str = ""
     telegram_chat_id: str = ""
+    market_analysis: MarketAnalysisConfig = None
+    
+    def __post_init__(self):
+        if self.market_analysis is None:
+            self.market_analysis = MarketAnalysisConfig()
     
     @classmethod
     def from_env(cls):
@@ -35,7 +53,52 @@ class TradingConfig:
             rsi_overbought=int(os.getenv('RSI_OVERBOUGHT', 70)),
             volume_multiplier=float(os.getenv('VOLUME_MULTIPLIER', 3.0)),
             telegram_bot_token=os.getenv('TELEGRAM_BOT_TOKEN', ''),
-            telegram_chat_id=os.getenv('TELEGRAM_CHAT_ID', '')
+            telegram_chat_id=os.getenv('TELEGRAM_CHAT_ID', ''),
+            market_analysis=MarketAnalysisConfig(
+                use_etf_for_index=os.getenv('USE_ETF_FOR_INDEX', 'true').lower() == 'true',
+                kospi_etf_code=os.getenv('KOSPI_ETF_CODE', '122630'),
+                kosdaq_etf_code=os.getenv('KOSDAQ_ETF_CODE', '233740'),
+                crash_threshold=float(os.getenv('CRASH_THRESHOLD', -2.0)),
+                strong_bullish_threshold=float(os.getenv('STRONG_BULLISH_THRESHOLD', 1.5)),
+                weak_bearish_threshold=float(os.getenv('WEAK_BEARISH_THRESHOLD', -1.0)),
+                high_volatility_threshold=float(os.getenv('HIGH_VOLATILITY_THRESHOLD', 35.0)),
+                cache_duration_minutes=int(os.getenv('CACHE_DURATION_MINUTES', 10)),
+                api_timeout_seconds=int(os.getenv('API_TIMEOUT_SECONDS', 30)),
+                fallback_cache_hours=int(os.getenv('FALLBACK_CACHE_HOURS', 2))
+            )
+        )
+    
+    @classmethod
+    def from_config_file(cls, config_file: str = "config.json"):
+        """설정 파일에서 구성 로드"""
+        config_data = load_config_from_file(config_file)
+        if not config_data:
+            return cls.from_env()
+        
+        trading_config = config_data.get('trading', {})
+        market_config = config_data.get('market_analysis', {})
+        
+        return cls(
+            max_positions=trading_config.get('max_positions', 3),
+            stop_loss_pct=trading_config.get('stop_loss_pct', -3.0),
+            take_profit_pct=trading_config.get('take_profit_pct', 5.0),
+            rsi_oversold=trading_config.get('rsi_oversold', 30),
+            rsi_overbought=trading_config.get('rsi_overbought', 70),
+            volume_multiplier=trading_config.get('volume_multiplier', 3.0),
+            telegram_bot_token=os.getenv('TELEGRAM_BOT_TOKEN', ''),
+            telegram_chat_id=os.getenv('TELEGRAM_CHAT_ID', ''),
+            market_analysis=MarketAnalysisConfig(
+                use_etf_for_index=market_config.get('use_etf_for_index', True),
+                kospi_etf_code=market_config.get('kospi_etf_code', '122630'),
+                kosdaq_etf_code=market_config.get('kosdaq_etf_code', '233740'),
+                crash_threshold=market_config.get('crash_threshold', -2.0),
+                strong_bullish_threshold=market_config.get('strong_bullish_threshold', 1.5),
+                weak_bearish_threshold=market_config.get('weak_bearish_threshold', -1.0),
+                high_volatility_threshold=market_config.get('high_volatility_threshold', 35.0),
+                cache_duration_minutes=market_config.get('cache_duration_minutes', 10),
+                api_timeout_seconds=market_config.get('api_timeout_seconds', 30),
+                fallback_cache_hours=market_config.get('fallback_cache_hours', 2)
+            )
         )
 
 def calculate_rsi(prices: List[float], period: int = 14) -> Optional[float]:

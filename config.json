@@ -7,6 +7,18 @@
     "rsi_overbought": 70,
     "volume_multiplier": 3.0
   },
+  "market_analysis": {
+    "use_etf_for_index": true,
+    "kospi_etf_code": "122630",
+    "kosdaq_etf_code": "233740",
+    "crash_threshold": -2.0,
+    "strong_bullish_threshold": 1.5,
+    "weak_bearish_threshold": -1.0,
+    "high_volatility_threshold": 35.0,
+    "cache_duration_minutes": 10,
+    "api_timeout_seconds": 30,
+    "fallback_cache_hours": 2
+  },
   "target_stocks": {
     "005930": "삼성전자",
     "000660": "SK하이닉스",

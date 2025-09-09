@@ -25,8 +25,8 @@ async def main():
         logger.error("Please copy .env.example to .env and fill in your API credentials")
         return
     
-    # 설정 로드
-    config = TradingConfig.from_env()
+    # 설정 로드 (config.json 우선, 없으면 환경변수)
+    config = TradingConfig.from_config_file("config.json")
     
     # CSV 파일 초기화
     create_trades_csv_if_not_exists()

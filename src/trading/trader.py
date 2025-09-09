@@ -62,7 +62,7 @@ class AutoTrader:
         self.data_manager = DataManager(max_data_points=100)
         
         # 새로운 고급 분석 모듈 초기화
-        self.market_analyzer = MarketAnalyzer(api_client=self.api)
+        self.market_analyzer = MarketAnalyzer(api_client=self.api, config=self.config.market_analysis)
         self.enhanced_signal = EnhancedSignalAnalyzer()
         
         # 거래 빈도 제어 모듈 초기화
@@ -939,10 +939,11 @@ class AutoTrader:
                     continue
                     
                 # 트레일링 스톱 체크
-                stop_price = self.stop_loss_manager.check_exit_signal(stock_code, current_price)
-                if stop_price:
-                    exit_price, reason = stop_price
-                    logger.info(f"📉 트레일링 스톱: {stock_code} {reason}")
+                exit_signal = self.stop_loss_manager.check_exit_signal(stock_code, current_price)
+                if exit_signal:
+                    exit_type, reason, exit_info = exit_signal
+                    exit_price = current_price  # 현재 가격으로 매도
+                    logger.info(f"📉 {exit_type}: {stock_code} {reason}")
                     await self.execute_sell_order(stock_code, exit_price)
                     continue
                     
