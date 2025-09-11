@@ -497,7 +497,15 @@ class AutoTrader:
                 
                 message = f"💰 RISK MANAGED BUY!\n종목: {stock_code}\n수량: {quantity}주\n가격: {price:,.0f}원\n투자금: {quantity*int(price):,}원\n사유: {reason}\n잔고: {self.risk_manager.current_balance:,.0f}원"
                 logger.warning(f"✅ BUY SUCCESS: {message.replace(chr(10), ' | ')}")
-                await send_telegram_message(message, self.config)
+                
+                # 텔레그램 메시지 전송 (안전한 try-catch 처리)
+                try:
+                    await send_telegram_message(message, self.config)
+                    logger.info("✓ 텔레그램 전송 완료 (RISK MANAGED BUY)")
+                except Exception as telegram_error:
+                    logger.error(f"Telegram error (ignored): {telegram_error}")
+                
+                logger.info("✓ Risk Managed Buy 처리 완료 - 함수 종료")
             else:
                 logger.error(f"❌ BUY ORDER FAILED: {stock_code} - API Response: {order_result}")
         
@@ -554,7 +562,12 @@ class AutoTrader:
                 
                 message = f"💰 BUY EXECUTED!\n종목: {stock_code}\n수량: {quantity}주\n가격: {price:,.0f}원\n투자금: {quantity*int(price):,}원\n사유: {reason}"
                 logger.warning(f"✅ BUY SUCCESS: {message.replace(chr(10), ' | ')}")
-                await send_telegram_message(message, self.config)
+                
+                # 텔레그램 메시지 전송 (안전한 try-catch 처리)
+                try:
+                    await send_telegram_message(message, self.config)
+                except Exception as telegram_error:
+                    logger.error(f"Telegram error (ignored): {telegram_error}")
             else:
                 logger.error(f"❌ BUY ORDER FAILED: {stock_code} - API Response: {order_result}")
         
@@ -603,11 +616,20 @@ class AutoTrader:
                 profit_emoji = "💚" if profit_amount > 0 else "❤️" if profit_amount < 0 else "💛"
                 message = f"{profit_emoji} RISK MANAGED SELL!\n종목: {stock_code}\n수량: {position.quantity}주\n가격: {price:,.0f}원\n매도금액: {sell_value:,}원\n손익: {profit_amount:+,.0f}원 ({profit_rate:+.2f}%)\n사유: {reason}\n잔고: {self.risk_manager.current_balance:,.0f}원"
                 logger.warning(f"✅ SELL SUCCESS: {message.replace(chr(10), ' | ')}")
-                await send_telegram_message(message, self.config)
                 
-                # 성과 분석 로그
-                daily_summary = self.risk_manager.get_daily_summary()
-                logger.info(f"📊 Daily Summary: {daily_summary['total_trades']}거래, 승률: {daily_summary['win_rate']:.1%}, 일일손익: {daily_summary['daily_pnl']:+,.0f}원")
+                # 텔레그램 메시지 전송 (안전한 try-catch 처리)
+                try:
+                    await send_telegram_message(message, self.config)
+                except Exception as telegram_error:
+                    logger.error(f"Telegram error (ignored): {telegram_error}")
+                
+                # 성과 분석 로그 (안전장치 추가)
+                try:
+                    daily_summary = self.risk_manager.get_daily_summary()
+                    logger.info(f"📊 Daily Summary: {daily_summary['total_trades']}거래, 승률: {daily_summary['win_rate']:.1%}, 일일손익: {daily_summary['daily_pnl']:+,.0f}원")
+                except Exception as summary_error:
+                    logger.error(f"Daily summary error (ignored): {summary_error}")
+                    logger.info("📊 Daily Summary: 요약 생성 실패, 거래는 정상 완료됨")
                 
                 del self.positions[stock_code]
             else:
@@ -650,7 +672,12 @@ class AutoTrader:
                 profit_emoji = "💚" if profit_amount > 0 else "❤️" if profit_amount < 0 else "💛"
                 message = f"{profit_emoji} SELL EXECUTED!\n종목: {stock_code}\n수량: {position.quantity}주\n가격: {price:,.0f}원\n매도금액: {sell_value:,}원\n손익: {profit_amount:+,.0f}원 ({profit_rate:+.2f}%)\n사유: {reason}"
                 logger.warning(f"✅ SELL SUCCESS: {message.replace(chr(10), ' | ')}")
-                await send_telegram_message(message, self.config)
+                
+                # 텔레그램 메시지 전송 (안전한 try-catch 처리)
+                try:
+                    await send_telegram_message(message, self.config)
+                except Exception as telegram_error:
+                    logger.error(f"Telegram error (ignored): {telegram_error}")
                 
                 del self.positions[stock_code]
             else:
@@ -929,13 +956,21 @@ class AutoTrader:
                 # 손절 체크
                 if profit_loss_pct <= stop_loss_threshold:
                     logger.warning(f"🚨 손절 신호: {stock_code} {profit_loss_pct:+.2f}%")
-                    await self.execute_sell_order(stock_code, current_price)
+                    try:
+                        await self.execute_sell_order(stock_code, current_price)
+                        logger.info(f"✓ 손절 매도 완료: {stock_code}")
+                    except Exception as sell_error:
+                        logger.error(f"손절 매도 오류 (ignored): {sell_error}")
                     continue
                     
                 # 익절 체크
                 elif profit_loss_pct >= take_profit_threshold:
                     logger.info(f"💰 익절 신호: {stock_code} {profit_loss_pct:+.2f}%")
-                    await self.execute_sell_order(stock_code, current_price)
+                    try:
+                        await self.execute_sell_order(stock_code, current_price)
+                        logger.info(f"✓ 익절 매도 완료: {stock_code}")
+                    except Exception as sell_error:
+                        logger.error(f"익절 매도 오류 (ignored): {sell_error}")
                     continue
                     
                 # 트레일링 스톱 체크
@@ -944,7 +979,11 @@ class AutoTrader:
                     exit_type, reason, exit_info = exit_signal
                     exit_price = current_price  # 현재 가격으로 매도
                     logger.info(f"📉 {exit_type}: {stock_code} {reason}")
-                    await self.execute_sell_order(stock_code, exit_price)
+                    try:
+                        await self.execute_sell_order(stock_code, exit_price)
+                        logger.info(f"✓ 트레일링 스톱 매도 완료: {stock_code}")
+                    except Exception as sell_error:
+                        logger.error(f"트레일링 스톱 매도 오류 (ignored): {sell_error}")
                     continue
                     
                 # 트레일링 스톱 업데이트

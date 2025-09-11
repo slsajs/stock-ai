@@ -43,8 +43,8 @@ class TradingFrequencyController:
     def __init__(self):
         # 설정값
         self.same_stock_cooldown_minutes = 10  # 같은 종목 재매수 대기시간 (분)
-        self.max_daily_trades = 10  # 일일 최대 거래 횟수
-        self.max_daily_trades_per_stock = 3  # 종목당 일일 최대 거래 횟수
+        self.max_daily_trades = 1000  # 일일 최대 거래 횟수
+        self.max_daily_trades_per_stock = 100  # 종목당 일일 최대 거래 횟수
         self.consecutive_loss_limit = 2  # 연속 손실 한계
         self.loss_cooldown_hours = 1  # 연속 손실 시 거래 중단 시간 (시간)
         self.min_profit_vs_fee_ratio = 2.0  # 최소 수익 vs 수수료 비율 (완화)
@@ -156,10 +156,10 @@ class TradingFrequencyController:
             stock_cooldown = self.stock_cooldowns[symbol]
             stock_cooldown.daily_trade_count += 1
             
-            # 연속 손실 리셋 (새로운 매수시)
+            # 쿨다운 기간 만료 시에만 쿨다운 해제 (연속 손실은 수익 거래 시에만 리셋)
             if stock_cooldown.loss_cooldown_until and current_time >= stock_cooldown.loss_cooldown_until:
-                stock_cooldown.consecutive_losses = 0
                 stock_cooldown.loss_cooldown_until = None
+                logger.info(f"{symbol} 손실 쿨다운 기간 만료 - 거래 재개 가능 (연속손실: {stock_cooldown.consecutive_losses}회 유지)")
             
             logger.info(f"매수 거래 기록: {symbol} {quantity}주 @{price:,.0f}원 - {reason}")
             logger.info(f"일일 거래 현황: 전체 {len([t for t in self.daily_trades if t.action == 'buy'])}/{self.max_daily_trades}, "
@@ -211,6 +211,8 @@ class TradingFrequencyController:
                     logger.warning(f"{symbol} 연속 {self.consecutive_loss_limit}회 손실로 {self.loss_cooldown_hours}시간 거래 중단")
             else:
                 # 수익 거래 시 연속 손실 리셋
+                if stock_cooldown.consecutive_losses > 0:
+                    logger.info(f"{symbol} 수익 거래로 연속 손실 리셋: {stock_cooldown.consecutive_losses}회 → 0회")
                 stock_cooldown.consecutive_losses = 0
                 
             logger.info(f"매도 거래 기록: {symbol} {quantity}주 @{price:,.0f}원")

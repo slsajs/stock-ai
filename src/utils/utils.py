@@ -166,22 +166,10 @@ def calculate_bollinger_bands(prices: List[float], period: int = 20, std_dev: in
     return upper_band, sma, lower_band
 
 async def send_telegram_message(message: str, config: TradingConfig):
-    """텔레그램 메시지 전송"""
-    if not TELEGRAM_AVAILABLE:
-        logging.info(f"Telegram not available. Message: {message}")
-        return
-        
-    if not config.telegram_bot_token or not config.telegram_chat_id:
-        logging.warning(f"Telegram credentials not configured. Message: {message}")
-        return
-    
-    try:
-        bot = Bot(token=config.telegram_bot_token)
-        await bot.send_message(chat_id=config.telegram_chat_id, text=message)
-        logging.info("Telegram message sent successfully")
-    except Exception as e:
-        logging.error(f"Failed to send telegram message: {e}")
-        logging.info(f"Message was: {message}")
+    """텔레그램 메시지 전송 - 완전 비활성화"""
+    # 텔레그램 기능 완전 비활성화 (서비스 중단 방지)
+    # 로깅도 제거하여 완전히 아무것도 하지 않음
+    pass
 
 def setup_logging(level: str = "INFO"):
     """로깅 설정"""
