@@ -629,3 +629,250 @@ class KISAPIClient:
         except Exception as e:
             logger.error(f"WebSocket listener error: {e}")
             logger.debug(f"Total messages processed: {message_count}")
+    
+    async def get_financial_data(self, stock_code: str) -> Dict:
+        """재무정보 조회"""
+        # API 호출 제한 적용
+        from ..utils.api_throttler import throttler
+        await throttler.throttle()
+        
+        url = f"{self.base_url}/uapi/domestic-stock/v1/finance/balance-sheet"
+        headers = self._get_headers("FHKST66430200")
+        params = {
+            "fid_cond_mrkt_div_code": "J",
+            "fid_input_iscd": stock_code,
+            "fid_input_date_1": "",  # 최근 데이터
+        }
+        
+        return await self._request("GET", url, headers, params)
+    
+    async def get_stock_overview(self, stock_code: str) -> Dict:
+        """종목 개요 및 재무지표 조회"""
+        # API 호출 제한 적용
+        from ..utils.api_throttler import throttler
+        await throttler.throttle()
+        
+        url = f"{self.base_url}/uapi/domestic-stock/v1/quotations/inquire-daily-price"
+        headers = self._get_headers("FHKST01010100")
+        params = {
+            "fid_cond_mrkt_div_code": "J",
+            "fid_input_iscd": stock_code,
+            "fid_org_adj_prc": "0"
+        }
+        
+        return await self._request("GET", url, headers, params)
+    
+    async def calculate_pbr(self, stock_code: str) -> Optional[float]:
+        """PBR 계산 (주가순자산비율)"""
+        try:
+            # 현재가 조회
+            price_data = await self.get_current_price(stock_code)
+            if not price_data or price_data.get('rt_cd') != '0':
+                logger.warning(f"Failed to get current price for {stock_code}")
+                return None
+            
+            current_price = float(price_data['output'].get('stck_prpr', 0))
+            if current_price <= 0:
+                return None
+            
+            # 재무정보 조회 (대안으로 기본 정보에서 추출)
+            overview_data = await self.get_stock_overview(stock_code)
+            if overview_data and overview_data.get('rt_cd') == '0':
+                output = overview_data.get('output', {})
+                
+                # PBR이 직접 제공되는지 확인
+                if 'pbr' in output or 'per_pbr' in output:
+                    pbr_value = output.get('pbr') or output.get('per_pbr')
+                    if pbr_value and pbr_value != '0':
+                        return float(pbr_value)
+                
+                # BPS(주당순자산가치)를 이용한 PBR 계산
+                bps = output.get('bps')  # Book Value Per Share
+                if bps and float(bps) > 0:
+                    pbr = current_price / float(bps)
+                    logger.debug(f"Calculated PBR for {stock_code}: {pbr:.2f} (Price: {current_price}, BPS: {bps})")
+                    return pbr
+            
+            logger.warning(f"Could not calculate PBR for {stock_code} - insufficient data")
+            return None
+            
+        except Exception as e:
+            logger.error(f"Error calculating PBR for {stock_code}: {e}")
+            return None
+    
+    async def calculate_per(self, stock_code: str) -> Optional[float]:
+        """PER 계산 (주가수익비율)"""
+        try:
+            # 현재가 조회
+            price_data = await self.get_current_price(stock_code)
+            if not price_data or price_data.get('rt_cd') != '0':
+                logger.warning(f"Failed to get current price for {stock_code}")
+                return None
+            
+            current_price = float(price_data['output'].get('stck_prpr', 0))
+            if current_price <= 0:
+                return None
+            
+            # 종목 개요에서 PER 정보 조회
+            overview_data = await self.get_stock_overview(stock_code)
+            if overview_data and overview_data.get('rt_cd') == '0':
+                output = overview_data.get('output', {})
+                
+                # PER이 직접 제공되는지 확인
+                if 'per' in output:
+                    per_value = output.get('per')
+                    if per_value and per_value != '0' and per_value != '-':
+                        return float(per_value)
+                
+                # EPS(주당순이익)를 이용한 PER 계산
+                eps = output.get('eps')  # Earnings Per Share
+                if eps and float(eps) > 0:
+                    per = current_price / float(eps)
+                    logger.debug(f"Calculated PER for {stock_code}: {per:.2f} (Price: {current_price}, EPS: {eps})")
+                    return per
+                
+                # 연간 순이익과 상장주식수로 PER 계산 (대안)
+                net_income = output.get('net_income')  # 순이익
+                shares_outstanding = output.get('lstg_st_cnt')  # 상장주식수
+                
+                if net_income and shares_outstanding:
+                    try:
+                        net_income_val = float(net_income)
+                        shares_val = float(shares_outstanding)
+                        if net_income_val > 0 and shares_val > 0:
+                            eps_calculated = net_income_val / shares_val
+                            per = current_price / eps_calculated
+                            logger.debug(f"Calculated PER for {stock_code}: {per:.2f} (from net income)")
+                            return per
+                    except:
+                        pass
+            
+            logger.warning(f"Could not calculate PER for {stock_code} - insufficient data")
+            return None
+            
+        except Exception as e:
+            logger.error(f"Error calculating PER for {stock_code}: {e}")
+            return None
+    
+    async def calculate_roe(self, stock_code: str) -> Optional[float]:
+        """ROE 계산 (자기자본이익률, %)"""
+        try:
+            # 종목 개요에서 ROE 정보 조회
+            overview_data = await self.get_stock_overview(stock_code)
+            if overview_data and overview_data.get('rt_cd') == '0':
+                output = overview_data.get('output', {})
+                
+                # ROE가 직접 제공되는지 확인
+                if 'roe' in output:
+                    roe_value = output.get('roe')
+                    if roe_value and roe_value != '0' and roe_value != '-':
+                        roe_percent = float(roe_value)
+                        logger.debug(f"Direct ROE for {stock_code}: {roe_percent:.2f}%")
+                        return roe_percent
+                
+                # 수동 ROE 계산: (순이익 / 자기자본) * 100
+                net_income = output.get('net_income')  # 순이익
+                equity = output.get('equity') or output.get('stockholders_equity')  # 자기자본
+                
+                if net_income and equity:
+                    try:
+                        net_income_val = float(net_income)
+                        equity_val = float(equity)
+                        if equity_val > 0:
+                            roe = (net_income_val / equity_val) * 100
+                            logger.debug(f"Calculated ROE for {stock_code}: {roe:.2f}% (NI: {net_income_val}, Equity: {equity_val})")
+                            return roe
+                    except:
+                        pass
+                
+                # 대안 계산: PBR과 PER을 이용한 ROE 추정
+                # ROE ≈ (1/PBR) * (1/PER) * Price * 100 (근사치)
+                pbr = await self.calculate_pbr(stock_code)
+                per = await self.calculate_per(stock_code)
+                
+                if pbr and per and pbr > 0 and per > 0:
+                    # DuPont 공식 근사: ROE = (Net Income/Sales) * (Sales/Assets) * (Assets/Equity)
+                    # 간단한 추정: ROE ≈ (1/PER) * (Price/Book) * 100
+                    estimated_roe = (1 / per) * (1 / pbr) * 100
+                    if 0 < estimated_roe < 100:  # 합리적 범위 체크
+                        logger.debug(f"Estimated ROE for {stock_code}: {estimated_roe:.2f}% (from PBR/PER)")
+                        return estimated_roe
+            
+            logger.warning(f"Could not calculate ROE for {stock_code} - insufficient data")
+            return None
+            
+        except Exception as e:
+            logger.error(f"Error calculating ROE for {stock_code}: {e}")
+            return None
+    
+    async def calculate_psr(self, stock_code: str) -> Optional[float]:
+        """PSR 계산 (주가매출액비율)"""
+        try:
+            # 현재가 조회
+            price_data = await self.get_current_price(stock_code)
+            if not price_data or price_data.get('rt_cd') != '0':
+                logger.warning(f"Failed to get current price for {stock_code}")
+                return None
+            
+            current_price = float(price_data['output'].get('stck_prpr', 0))
+            if current_price <= 0:
+                return None
+            
+            # 종목 개요에서 PSR 정보 조회
+            overview_data = await self.get_stock_overview(stock_code)
+            if overview_data and overview_data.get('rt_cd') == '0':
+                output = overview_data.get('output', {})
+                
+                # PSR이 직접 제공되는지 확인
+                if 'psr' in output:
+                    psr_value = output.get('psr')
+                    if psr_value and psr_value != '0' and psr_value != '-':
+                        psr = float(psr_value)
+                        logger.debug(f"Direct PSR for {stock_code}: {psr:.2f}")
+                        return psr
+                
+                # 수동 PSR 계산: 시가총액 / 매출액
+                shares_outstanding = output.get('lstg_st_cnt')  # 상장주식수
+                revenue = output.get('revenue') or output.get('sales') or output.get('total_revenue')  # 매출액
+                
+                if shares_outstanding and revenue:
+                    try:
+                        shares_val = float(shares_outstanding)
+                        revenue_val = float(revenue)
+                        if revenue_val > 0 and shares_val > 0:
+                            market_cap = current_price * shares_val
+                            psr = market_cap / revenue_val
+                            logger.debug(f"Calculated PSR for {stock_code}: {psr:.2f} (MarketCap: {market_cap}, Revenue: {revenue_val})")
+                            return psr
+                    except:
+                        pass
+                
+                # 대안 계산: 주당매출액(SPS)을 이용한 PSR 계산
+                sps = output.get('sps') or output.get('sales_per_share')  # Sales Per Share
+                if sps and float(sps) > 0:
+                    psr = current_price / float(sps)
+                    logger.debug(f"Calculated PSR for {stock_code}: {psr:.2f} (Price: {current_price}, SPS: {sps})")
+                    return psr
+                
+                # 최후 추정: PER과 순이익률을 이용한 PSR 추정
+                # PSR ≈ PER × Net Margin (순이익률)
+                per = await self.calculate_per(stock_code)
+                if per and revenue:
+                    try:
+                        net_income = output.get('net_income')
+                        if net_income and float(revenue) > 0:
+                            net_margin = float(net_income) / float(revenue)
+                            if 0 < net_margin < 1:  # 합리적 순이익률 범위
+                                estimated_psr = per * net_margin
+                                if 0 < estimated_psr < 20:  # 합리적 PSR 범위
+                                    logger.debug(f"Estimated PSR for {stock_code}: {estimated_psr:.2f} (from PER × Net Margin)")
+                                    return estimated_psr
+                    except:
+                        pass
+            
+            logger.warning(f"Could not calculate PSR for {stock_code} - insufficient data")
+            return None
+            
+        except Exception as e:
+            logger.error(f"Error calculating PSR for {stock_code}: {e}")
+            return None

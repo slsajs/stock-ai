@@ -1,0 +1,41 @@
+{
+  "급등주_필터_옵션": {
+    "옵션1_완화된_설정": {
+      "enable_surge_filter": true,
+      "max_daily_change": 20.0,
+      "max_volume_ratio": 8.0,
+      "max_volatility": 50.0,
+      "max_surge_score": 85.0,
+      "설명": "완화된 기준으로 극단적인 급등주만 제외"
+    },
+    
+    "옵션2_매우_완화된_설정": {
+      "enable_surge_filter": true,
+      "max_daily_change": 30.0,
+      "max_volume_ratio": 10.0,
+      "max_volatility": 60.0,
+      "max_surge_score": 90.0,
+      "설명": "매우 극단적인 급등주만 제외"
+    },
+    
+    "옵션3_임시_비활성화": {
+      "enable_surge_filter": false,
+      "설명": "급등주 필터를 완전히 비활성화"
+    },
+    
+    "옵션4_선택적_활성화": {
+      "enable_surge_filter": true,
+      "max_daily_change": 999.0,
+      "max_volume_ratio": 999.0,
+      "max_volatility": 30.0,
+      "max_surge_score": 85.0,
+      "설명": "변동성만 체크하고 등락률/거래량은 무시"
+    }
+  },
+  
+  "추천_설정": {
+    "현재_적용됨": "옵션1_완화된_설정",
+    "이유": "너무 엄격한 필터로 모든 종목이 제외되는 문제 해결",
+    "효과": "극단적 급등주는 여전히 제외하되, 일반적인 종목은 통과"
+  }
+}

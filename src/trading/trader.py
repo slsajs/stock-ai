@@ -15,6 +15,8 @@ from ..analysis.market_analyzer import MarketAnalyzer
 from ..analysis.enhanced_signal_analyzer import EnhancedSignalAnalyzer
 from .risk_manager import RiskManager
 from .stop_loss_manager import StopLossManager
+from .enhanced_stop_loss_manager import EnhancedStopLossManager
+from .smart_timing_manager import SmartTimingManager
 from .trading_frequency_controller import TradingFrequencyController
 
 logger = logging.getLogger(__name__)
@@ -43,8 +45,13 @@ class AutoTrader:
         self.api = api_client
         self.positions: Dict[str, Position] = {}
         
+        # 설정을 딕셔너리로 변환 (여러 모듈에서 사용)
+        config_dict = self._config_to_dict(config)
+        
         # 리스크 관리 모듈 초기화 (임시값, 실제 잔고는 start_trading에서 업데이트)
         self.risk_manager = RiskManager(initial_balance=8000000)  # 임시 800만원
+        
+        # 기존 손절 시스템
         self.stop_loss_manager = StopLossManager(
             default_stop_loss_pct=0.02,  # 2% 손절
             default_take_profit_pct=0.03,  # 3% 익절
@@ -52,8 +59,14 @@ class AutoTrader:
             max_position_time=30  # 30분 최대 보유
         )
         
-        # 동적 종목 선정 시스템 초기화
-        self.stock_selector = DynamicStockSelector(api_client)
+        # 강화된 손절 시스템 추가
+        self.enhanced_stop_loss = EnhancedStopLossManager(api_client, config_dict)
+        
+        # 스마트 타이밍 매니저 추가
+        self.smart_timing = SmartTimingManager(config_dict)
+        
+        # 동적 종목 선정 시스템 초기화 (설정 포함)
+        self.stock_selector = DynamicStockSelector(api_client, config_dict)
         self.target_stocks = ["005930"]  # 초기값 (동적으로 업데이트 됨)
         self.need_resubscribe = False  # WebSocket 재구독 플래그
         
@@ -1250,3 +1263,14 @@ class AutoTrader:
         except Exception as e:
             logger.error(f"Error generating risk summary: {e}")
             return "리스크 요약 생성 실패"
+    
+    def _config_to_dict(self, config: TradingConfig) -> Dict:
+        """TradingConfig 객체를 딕셔너리로 변환"""
+        try:
+            # config.json에서 원본 데이터 읽기
+            from ..utils.utils import load_config_from_file
+            config_data = load_config_from_file("config.json")
+            return config_data or {}
+        except Exception as e:
+            logger.warning(f"Failed to load config.json: {e}")
+            return {}

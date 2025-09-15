@@ -7,6 +7,45 @@
     "rsi_overbought": 70,
     "volume_multiplier": 3.0
   },
+  "valuation_filters": {
+    "enable_pbr_filter": true,
+    "max_pbr": 1.6,
+    "min_pbr": 0.1,
+    "enable_per_filter": true,
+    "max_per": 12.6,
+    "min_per": 3.0,
+    "enable_roe_filter": true,
+    "min_roe": 13.2,
+    "enable_psr_filter": false,
+    "max_psr": 2.7,
+    "filter_weight": 0.3,
+    "require_all_data": false,
+    "fallback_on_data_fail": true
+  },
+  "surge_filter": {
+    "enable_surge_filter": true,
+    "max_daily_change": 20.0,
+    "max_volume_ratio": 8.0,
+    "max_volatility": 50.0,
+    "max_surge_score": 85.0
+  },
+  "enhanced_stop_loss": {
+    "stop_loss_pct": 1.5,
+    "take_profit_pct": 3.0,
+    "trailing_stop_pct": 1.0,
+    "force_execution": true,
+    "max_execution_delay_seconds": 5
+  },
+  "smart_timing": {
+    "morning_wait_minutes": 30,
+    "avoid_opening_surge": true,
+    "high_volatility_threshold": 25.0,
+    "extreme_volatility_threshold": 35.0,
+    "max_surge_change": 15.0,
+    "volume_spike_threshold": 5.0,
+    "bearish_threshold": -1.5,
+    "crash_threshold": -2.5
+  },
   "market_analysis": {
     "use_etf_for_index": true,
     "kospi_etf_code": "122630",

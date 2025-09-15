@@ -3,14 +3,19 @@ import asyncio
 from datetime import datetime, time
 from typing import List, Dict, Optional
 from ..api import KISAPIClient
+from .valuation_analyzer import ValuationAnalyzer
+from .surge_filter import SurgeFilter
 
 logger = logging.getLogger(__name__)
 
 class DynamicStockSelector:
     """동적 종목 선정 클래스"""
     
-    def __init__(self, api_client: KISAPIClient):
+    def __init__(self, api_client: KISAPIClient, config: Dict = None):
         self.api_client = api_client
+        self.config = config or {}
+        self.valuation_analyzer = ValuationAnalyzer(api_client)
+        self.surge_filter = SurgeFilter(api_client)
         self.last_update = None
         self.current_target_stocks = []
         self.update_interval_minutes = 5  # 테스트용 5분마다 업데이트
@@ -89,14 +94,140 @@ class DynamicStockSelector:
                 logger.warning("No active stocks found, using default stocks")
                 return ["005930", "000660", "035420"]  # 기본 종목들
             
-            # API에서 이미 필터링된 종목들이므로 바로 사용
-            logger.info(f"✅ Using {len(active_stocks)} filtered stocks from API")
+            # 급등주 필터링 먼저 적용
+            stock_codes = [stock['stock_code'] for stock in active_stocks]
+            surge_config = self.config.get('surge_filter', {})
+            
+            if surge_config.get('enable_surge_filter', False):
+                logger.info("🚫 Applying surge stock filtering...")
+                filtered_by_surge = await self.surge_filter.filter_surge_stocks(stock_codes, self.config)
+                
+                if filtered_by_surge:
+                    active_stocks = [s for s in active_stocks if s['stock_code'] in filtered_by_surge]
+                    stock_codes = [s['stock_code'] for s in active_stocks]
+                    logger.info(f"📊 Surge filtering result: {len(active_stocks)} stocks passed")
+                else:
+                    logger.warning("🚫 모든 종목이 급등주로 분류되어 제외됨")
+                    active_stocks = active_stocks[:3]  # 상위 3개만 유지
+                    stock_codes = [s['stock_code'] for s in active_stocks]
+            else:
+                logger.info("⏭️ Surge filtering disabled")
+            
+            # 밸류에이션 필터링 적용
+            valuation_config = self.config.get('valuation_filters', {})
+            
+            # PBR 필터링
+            if valuation_config.get('enable_pbr_filter', False):
+                logger.info("🔍 Applying PBR filtering...")
+                
+                min_pbr = valuation_config.get('min_pbr', 0.1)
+                max_pbr = valuation_config.get('max_pbr', 2.0)
+                require_data = valuation_config.get('require_all_data', False)
+                fallback_enabled = valuation_config.get('fallback_on_data_fail', True)
+                
+                filtered_by_pbr = await self.valuation_analyzer.filter_by_pbr(
+                    stock_codes, min_pbr, max_pbr, require_data
+                )
+                
+                if filtered_by_pbr:
+                    # PBR 필터링을 통과한 종목들만 유지
+                    active_stocks = [s for s in active_stocks if s['stock_code'] in filtered_by_pbr]
+                    stock_codes = [s['stock_code'] for s in active_stocks]  # 업데이트
+                    logger.info(f"📊 PBR filtering result: {len(active_stocks)} stocks passed")
+                elif not fallback_enabled:
+                    logger.warning("🚫 PBR 필터링: 모든 종목 제외됨 (폴백 비활성화)")
+                    active_stocks = []
+                else:
+                    logger.warning("❌ PBR 데이터 부족으로 필터링 우회")
+            else:
+                logger.info("⏭️ PBR filtering disabled")
+            
+            # PER 필터링
+            if valuation_config.get('enable_per_filter', False) and active_stocks:
+                logger.info("🔍 Applying PER filtering...")
+                
+                min_per = valuation_config.get('min_per', 3.0)
+                max_per = valuation_config.get('max_per', 20.0)
+                require_data = valuation_config.get('require_all_data', False)
+                fallback_enabled = valuation_config.get('fallback_on_data_fail', True)
+                
+                stock_codes = [s['stock_code'] for s in active_stocks]
+                filtered_by_per = await self.valuation_analyzer.filter_by_per(
+                    stock_codes, min_per, max_per, require_data
+                )
+                
+                if filtered_by_per:
+                    # PER 필터링을 통과한 종목들만 유지
+                    active_stocks = [s for s in active_stocks if s['stock_code'] in filtered_by_per]
+                    logger.info(f"📊 PER filtering result: {len(active_stocks)} stocks passed")
+                elif not fallback_enabled:
+                    logger.warning("🚫 PER 필터링: 모든 종목 제외됨 (폴백 비활성화)")
+                    active_stocks = []
+                else:
+                    logger.warning("❌ PER 데이터 부족으로 필터링 우회")
+            else:
+                logger.info("⏭️ PER filtering disabled")
+            
+            # ROE 필터링
+            if valuation_config.get('enable_roe_filter', False) and active_stocks:
+                logger.info("🔍 Applying ROE filtering...")
+                
+                min_roe = valuation_config.get('min_roe', 5.0)
+                require_data = valuation_config.get('require_all_data', False)
+                fallback_enabled = valuation_config.get('fallback_on_data_fail', True)
+                
+                stock_codes = [s['stock_code'] for s in active_stocks]  # 최신 목록으로 업데이트
+                filtered_by_roe = await self.valuation_analyzer.filter_by_roe(
+                    stock_codes, min_roe, require_data
+                )
+                
+                if filtered_by_roe:
+                    # ROE 필터링을 통과한 종목들만 유지
+                    active_stocks = [s for s in active_stocks if s['stock_code'] in filtered_by_roe]
+                    logger.info(f"📊 ROE filtering result: {len(active_stocks)} stocks passed")
+                elif not fallback_enabled:
+                    logger.warning("🚫 ROE 필터링: 모든 종목 제외됨 (폴백 비활성화)")
+                    active_stocks = []
+                else:
+                    logger.warning("❌ ROE 데이터 부족으로 필터링 우회")
+            else:
+                logger.info("⏭️ ROE filtering disabled")
+            
+            # PSR 필터링 (현재 비활성화됨)
+            if valuation_config.get('enable_psr_filter', False) and active_stocks:
+                logger.info("🔍 Applying PSR filtering...")
+                
+                max_psr = valuation_config.get('max_psr', 3.0)
+                require_data = valuation_config.get('require_all_data', False)
+                fallback_enabled = valuation_config.get('fallback_on_data_fail', True)
+                
+                stock_codes = [s['stock_code'] for s in active_stocks]  # 최신 목록으로 업데이트
+                filtered_by_psr = await self.valuation_analyzer.filter_by_psr(
+                    stock_codes, max_psr, require_data
+                )
+                
+                if filtered_by_psr:
+                    # PSR 필터링을 통과한 종목들만 유지
+                    active_stocks = [s for s in active_stocks if s['stock_code'] in filtered_by_psr]
+                    logger.info(f"📊 PSR filtering result: {len(active_stocks)} stocks passed")
+                elif not fallback_enabled:
+                    logger.warning("🚫 PSR 필터링: 모든 종목 제외됨 (폴백 비활성화)")
+                    active_stocks = []
+                else:
+                    logger.warning("❌ PSR 데이터 부족으로 필터링 우회")
+            else:
+                logger.info("⏭️ PSR filtering disabled (데이터 부족으로 비활성화)")
+            
+            if not active_stocks:
+                logger.warning("No stocks remaining after valuation filtering, using defaults")
+                return ["005930", "000660", "035420"]
+            
+            # 최종 종목 선정
             self.current_target_stocks = [stock['stock_code'] for stock in active_stocks]
             self.last_update = datetime.now()
             
-            # 선정된 종목 로깅
-            stock_info = [f"{s['stock_name']}({s['stock_code']})" for s in active_stocks[:5]]
-            logger.info(f"📈 Final selected target stocks: {', '.join(stock_info)}")
+            # 선정된 종목 로깅 (밸류에이션 정보 포함)
+            await self._log_selected_stocks(active_stocks)
             
             return self.current_target_stocks
                 
@@ -245,3 +376,49 @@ class DynamicStockSelector:
             summary += f"\n마지막 업데이트: {self.last_update.strftime('%H:%M:%S')}"
         
         return summary
+    
+    async def _log_selected_stocks(self, active_stocks: List[Dict]):
+        """선정된 종목들을 밸류에이션 정보와 함께 로깅"""
+        logger.info("📈 Final selected stocks with valuation:")
+        
+        for i, stock in enumerate(active_stocks[:5], 1):
+            stock_code = stock['stock_code']
+            stock_name = stock['stock_name']
+            
+            # 밸류에이션 정보 조회
+            try:
+                metrics = await self.valuation_analyzer.get_valuation_metrics(stock_code)
+                valuation_info = []
+                
+                if metrics and metrics.pbr is not None:
+                    valuation_info.append(f"PBR: {metrics.pbr:.2f}")
+                else:
+                    valuation_info.append("PBR: N/A")
+                
+                if metrics and metrics.per is not None:
+                    valuation_info.append(f"PER: {metrics.per:.2f}")
+                else:
+                    valuation_info.append("PER: N/A")
+                
+                if metrics and metrics.roe is not None:
+                    valuation_info.append(f"ROE: {metrics.roe:.2f}%")
+                else:
+                    valuation_info.append("ROE: N/A")
+                
+                if metrics and metrics.psr is not None:
+                    valuation_info.append(f"PSR: {metrics.psr:.2f}")
+                else:
+                    valuation_info.append("PSR: N/A")
+                
+                valuation_str = ", ".join(valuation_info)
+            except:
+                valuation_str = "PBR: Error, PER: Error, ROE: Error, PSR: Error"
+            
+            logger.info(f"  {i}. {stock_name}({stock_code}): "
+                       f"가격 {stock['current_price']:,.0f}원, "
+                       f"등락률 {stock['change_rate']:+.2f}%, "
+                       f"{valuation_str}")
+    
+    def get_valuation_config(self) -> Dict:
+        """현재 밸류에이션 필터 설정 반환"""
+        return self.config.get('valuation_filters', {})

@@ -10,7 +10,9 @@
       "WebFetch(domain:github.com)",
       "Bash(timeout:*)",
       "WebFetch(domain:apiportal.koreainvestment.com)",
-      "WebFetch(domain:hky035.github.io)"
+      "WebFetch(domain:hky035.github.io)",
+      "Bash(ping:*)",
+      "Bash(nslookup:*)"
     ],
     "deny": [],
     "ask": []
