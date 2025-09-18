@@ -26,19 +26,23 @@ class SmartTimingManager:
         
         # 타이밍 설정
         timing_config = self.config.get('smart_timing', {})
-        
-        # 장 초반 대기 설정
-        self.morning_wait_minutes = timing_config.get('morning_wait_minutes', 30)
+
+        # 장 초반 대기 설정 - 더 보수적으로 조정
+        self.morning_wait_minutes = timing_config.get('morning_wait_minutes', 45)  # 45분으로 증가
         self.avoid_opening_surge = timing_config.get('avoid_opening_surge', True)
-        
-        # 변동성 기준
-        self.high_volatility_threshold = timing_config.get('high_volatility_threshold', 25.0)
-        self.extreme_volatility_threshold = timing_config.get('extreme_volatility_threshold', 35.0)
-        
-        # 급등 회피 설정
-        self.max_surge_change = timing_config.get('max_surge_change', 15.0)  # 15% 이상 급등 회피
-        self.volume_spike_threshold = timing_config.get('volume_spike_threshold', 5.0)  # 5배 이상 급증
-        
+
+        # 변동성 기준 - 더 엄격하게 설정
+        self.high_volatility_threshold = timing_config.get('high_volatility_threshold', 20.0)  # 25 → 20으로 강화
+        self.extreme_volatility_threshold = timing_config.get('extreme_volatility_threshold', 30.0)  # 35 → 30으로 강화
+
+        # 급등 회피 설정 - 더 보수적으로 설정
+        self.max_surge_change = timing_config.get('max_surge_change', 10.0)  # 15% → 10%로 강화
+        self.volume_spike_threshold = timing_config.get('volume_spike_threshold', 3.0)  # 5배 → 3배로 강화
+
+        # 시간별 포지션 관리 설정 추가
+        self.max_position_hold_minutes = timing_config.get('max_position_hold_minutes', 20)  # 30분 → 20분으로 단축
+        self.profit_taking_time_minutes = timing_config.get('profit_taking_time_minutes', 15)  # 15분 후 수익시 매도 고려
+
         # 시장 상황 기준
         self.bearish_threshold = timing_config.get('bearish_threshold', -1.5)
         self.crash_threshold = timing_config.get('crash_threshold', -2.5)
@@ -230,6 +234,52 @@ class SmartTimingManager:
             recommendations.append("다른 저평가 종목 발굴")
         
         return recommendations
+
+    def check_position_timing(self, stock_code: str, entry_time: datetime, current_price: float, entry_price: float) -> TimingCondition:
+        """보유 포지션의 매도 타이밍 체크"""
+        try:
+            hold_duration = (datetime.now() - entry_time).total_seconds() / 60  # 분 단위
+            profit_rate = (current_price - entry_price) / entry_price * 100
+
+            # 최대 보유시간 초과 체크
+            if hold_duration >= self.max_position_hold_minutes:
+                if profit_rate > 0:
+                    return TimingCondition(
+                        is_trading_allowed=True,  # 매도 허용
+                        reason=f"시간만료 익절 ({self.max_position_hold_minutes}분 초과)",
+                        risk_level="LOW"
+                    )
+                else:
+                    return TimingCondition(
+                        is_trading_allowed=True,  # 매도 허용
+                        reason=f"시간만료 손절 ({self.max_position_hold_minutes}분 초과)",
+                        risk_level="MEDIUM"
+                    )
+
+            # 수익 실현 타이밍 체크
+            if hold_duration >= self.profit_taking_time_minutes and profit_rate >= 1.0:
+                return TimingCondition(
+                    is_trading_allowed=True,  # 매도 고려
+                    reason=f"수익 실현 타이밍 ({self.profit_taking_time_minutes}분 경과, {profit_rate:+.2f}%)",
+                    risk_level="LOW"
+                )
+
+            # 아직 보유 유지
+            remaining_minutes = max(0, self.max_position_hold_minutes - hold_duration)
+            return TimingCondition(
+                is_trading_allowed=False,  # 보유 지속
+                reason=f"보유 지속 (잔여시간: {remaining_minutes:.0f}분, 수익률: {profit_rate:+.2f}%)",
+                wait_minutes=int(remaining_minutes),
+                risk_level="LOW"
+            )
+
+        except Exception as e:
+            self.logger.error(f"포지션 타이밍 체크 오류 {stock_code}: {e}")
+            return TimingCondition(
+                is_trading_allowed=False,
+                reason="타이밍 체크 오류",
+                risk_level="HIGH"
+            )
     
     def get_timing_score(self, market_data: Dict, stock_data: Dict = None) -> float:
         """타이밍 점수 (0-100, 높을수록 좋은 타이밍)"""

@@ -42,12 +42,16 @@ class TradingFrequencyController:
     
     def __init__(self):
         # 설정값
-        self.same_stock_cooldown_minutes = 10  # 같은 종목 재매수 대기시간 (분)
-        self.max_daily_trades = 1000  # 일일 최대 거래 횟수
-        self.max_daily_trades_per_stock = 100  # 종목당 일일 최대 거래 횟수
+        self.same_stock_cooldown_minutes = 15  # 같은 종목 재매수 대기시간 (분) - 15분으로 증가
+        self.max_daily_trades = 50  # 일일 최대 거래 횟수 - 50회로 제한
+        self.max_daily_trades_per_stock = 3  # 종목당 일일 최대 거래 횟수 - 3회로 강화 제한
         self.consecutive_loss_limit = 2  # 연속 손실 한계
-        self.loss_cooldown_hours = 1  # 연속 손실 시 거래 중단 시간 (시간)
-        self.min_profit_vs_fee_ratio = 2.0  # 최소 수익 vs 수수료 비율 (완화)
+        self.loss_cooldown_hours = 2  # 연속 손실 시 거래 중단 시간 (시간) - 2시간으로 증가
+        self.min_profit_vs_fee_ratio = 3.0  # 최소 수익 vs 수수료 비율 - 3.0으로 강화
+
+        # 종목 다양화를 위한 새로운 설정
+        self.max_same_sector_ratio = 0.4  # 같은 섹터 비중 최대 40%
+        self.preferred_diversification_count = 5  # 선호 다양화 종목 수
         
         # 수수료 설정 (한국투자증권 기준)
         self.buy_fee_rate = 0.00015  # 0.015% (최소 1원)

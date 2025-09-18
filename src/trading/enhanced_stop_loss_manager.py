@@ -24,6 +24,7 @@ class PositionInfo:
     take_profit_price: float
     trailing_stop_price: Optional[float] = None
     max_price_seen: float = 0.0
+    volatility: float = 0.0  # 변동성 지표 추가
     
 class EnhancedStopLossManager:
     """강화된 손절 관리자"""
@@ -34,11 +35,12 @@ class EnhancedStopLossManager:
         self.positions: Dict[str, PositionInfo] = {}
         self.logger = logging.getLogger(__name__)
         
-        # 손절 설정
+        # 손절 설정 - 변동성 기반 동적 조정
         stop_loss_config = self.config.get('enhanced_stop_loss', {})
-        self.stop_loss_pct = stop_loss_config.get('stop_loss_pct', 1.5)  # 1.5%로 더 엄격
+        self.base_stop_loss_pct = stop_loss_config.get('stop_loss_pct', 1.5)  # 기본 1.5%
+        self.volatility_multiplier = stop_loss_config.get('volatility_multiplier', 1.5)  # 변동성 승수
         self.take_profit_pct = stop_loss_config.get('take_profit_pct', 3.0)
-        self.trailing_stop_pct = stop_loss_config.get('trailing_stop_pct', 1.0)
+        self.base_trailing_stop_pct = stop_loss_config.get('trailing_stop_pct', 1.0)  # 기본 트레일링 1.0%
         
         # 즉시 실행 설정
         self.force_execution = stop_loss_config.get('force_execution', True)
@@ -50,10 +52,52 @@ class EnhancedStopLossManager:
         self.is_running = False
         
         self.logger.info(f"Enhanced StopLoss Manager 초기화:")
-        self.logger.info(f"  • 손절: {self.stop_loss_pct}%")
-        self.logger.info(f"  • 익절: {self.take_profit_pct}%") 
-        self.logger.info(f"  • 트레일링: {self.trailing_stop_pct}%")
+        self.logger.info(f"  • 기본 손절: {self.base_stop_loss_pct}%")
+        self.logger.info(f"  • 익절: {self.take_profit_pct}%")
+        self.logger.info(f"  • 기본 트레일링: {self.base_trailing_stop_pct}%")
+        self.logger.info(f"  • 변동성 승수: {self.volatility_multiplier}")
         self.logger.info(f"  • 강제실행: {self.force_execution}")
+
+    def _calculate_volatility(self, stock_code: str, current_price: float) -> float:
+        """종목의 변동성 계산 (간단한 ATR 기반)"""
+        try:
+            # 실제 구현에서는 ATR 등을 사용하지만, 여기서는 간단히 구현
+            if stock_code not in self.positions:
+                return 0.02  # 기본 2% 변동성
+
+            position = self.positions[stock_code]
+            # 매수가 대비 현재 변동폭을 기준으로 변동성 계산
+            price_change_pct = abs(current_price - position.avg_price) / position.avg_price
+
+            # 변동성 = 최근 변동폭의 평균 (간단히 현재 변동폭 사용)
+            volatility = max(0.01, min(0.1, price_change_pct * 2))  # 1%~10% 범위
+
+            return volatility
+        except Exception as e:
+            self.logger.error(f"변동성 계산 오류 {stock_code}: {e}")
+            return 0.02
+
+    def _get_dynamic_stop_loss_pct(self, stock_code: str, current_price: float) -> float:
+        """변동성 기반 동적 손절률 계산"""
+        volatility = self._calculate_volatility(stock_code, current_price)
+        dynamic_stop_loss = self.base_stop_loss_pct * (1 + volatility * self.volatility_multiplier)
+
+        # 최소 1%, 최대 5% 제한
+        dynamic_stop_loss = max(1.0, min(5.0, dynamic_stop_loss))
+
+        self.logger.debug(f"{stock_code} 동적 손절률: {dynamic_stop_loss:.2f}% (변동성: {volatility:.3f})")
+        return dynamic_stop_loss
+
+    def _get_dynamic_trailing_stop_pct(self, stock_code: str, current_price: float) -> float:
+        """변동성 기반 동적 트레일링스탑률 계산"""
+        volatility = self._calculate_volatility(stock_code, current_price)
+        dynamic_trailing = self.base_trailing_stop_pct * (1 + volatility * self.volatility_multiplier)
+
+        # 최소 0.5%, 최대 3% 제한
+        dynamic_trailing = max(0.5, min(3.0, dynamic_trailing))
+
+        self.logger.debug(f"{stock_code} 동적 트레일링: {dynamic_trailing:.2f}% (변동성: {volatility:.3f})")
+        return dynamic_trailing
     
     async def start_monitoring(self):
         """모니터링 시작"""
@@ -77,8 +121,9 @@ class EnhancedStopLossManager:
         if current_price is None:
             current_price = avg_price
             
-        # 손절/익절가 계산
-        stop_loss_price = avg_price * (1 - self.stop_loss_pct / 100)
+        # 손절/익절가 계산 - 동적 손절률 사용
+        dynamic_stop_loss_pct = self._get_dynamic_stop_loss_pct(stock_code, current_price)
+        stop_loss_price = avg_price * (1 - dynamic_stop_loss_pct / 100)
         take_profit_price = avg_price * (1 + self.take_profit_pct / 100)
         
         position = PositionInfo(
@@ -97,7 +142,7 @@ class EnhancedStopLossManager:
         
         self.logger.info(f"📍 Enhanced Position added: {stock_name}({stock_code}) "
                         f"{quantity}주 @{avg_price:,.0f}원")
-        self.logger.info(f"   손절가: {stop_loss_price:,.0f}원 ({self.stop_loss_pct}%)")
+        self.logger.info(f"   손절가: {stop_loss_price:,.0f}원 ({dynamic_stop_loss_pct:.2f}%)")
         self.logger.info(f"   익절가: {take_profit_price:,.0f}원 ({self.take_profit_pct}%)")
     
     async def update_price(self, stock_code: str, current_price: float):

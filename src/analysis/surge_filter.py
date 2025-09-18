@@ -46,11 +46,19 @@ class SurgeFilter:
             # 변동성 계산
             price_volatility = await self._calculate_price_volatility(stock_code)
             
-            # 급등주 판단
+            # 급등주 판단 기준 - 더 유연하게 조정
             surge_config = config.get('surge_filter', {})
-            max_daily_change = surge_config.get('max_daily_change', 10.0)
-            max_volume_ratio = surge_config.get('max_volume_ratio', 5.0)
-            max_volatility = surge_config.get('max_volatility', 30.0)
+            max_daily_change = surge_config.get('max_daily_change', 7.0)  # 10% → 7%로 완화
+            max_volume_ratio = surge_config.get('max_volume_ratio', 8.0)  # 5배 → 8배로 완화
+            max_volatility = surge_config.get('max_volatility', 25.0)  # 30 → 25로 강화
+
+            # 시간대별 완화 적용
+            current_hour = datetime.now().hour
+            if 9 <= current_hour <= 10:  # 장초반 완화
+                max_daily_change *= 1.5  # 50% 완화
+                max_volume_ratio *= 1.3  # 30% 완화
+            elif 14 <= current_hour <= 15:  # 장후반 완화
+                max_daily_change *= 1.2  # 20% 완화
             
             is_surge_stock = (
                 abs(daily_change_pct) > max_daily_change or
@@ -112,8 +120,40 @@ class SurgeFilter:
             except Exception as e:
                 self.logger.error(f"급등 필터링 오류 {stock_code}: {e}")
         
+        # 필터링된 종목이 너무 적으면 대안 종목 추가
+        if len(filtered_stocks) < max(1, len(stock_codes) * 0.3):  # 30% 미만이면
+            alternative_stocks = await self._find_alternative_stocks(filtered_results, config)
+            filtered_stocks.extend(alternative_stocks)
+            self.logger.info(f"🔄 대안 종목 {len(alternative_stocks)}개 추가")
+
         self.logger.info(f"🎯 급등주 필터링 완료: {len(stock_codes)}개 → {len(filtered_stocks)}개")
         return filtered_stocks
+
+    async def _find_alternative_stocks(self, filtered_results: List[SurgeMetrics], config: Dict) -> List[str]:
+        """급등주 대신 거래할 대안 종목 발굴"""
+        try:
+            # 급등 점수가 낮은 순으로 정렬하여 상위 몇 개 선택
+            sorted_stocks = sorted(filtered_results, key=lambda x: x.surge_score)
+
+            alternative_stocks = []
+            for surge_metric in sorted_stocks:
+                # 급등 점수가 40 미만이고, 거래량이 적당한 종목을 대안으로 선택
+                if (surge_metric.surge_score < 40 and
+                    surge_metric.volume_ratio >= 1.5 and  # 최소한의 거래량은 필요
+                    abs(surge_metric.daily_change_pct) <= 5.0):  # 적당한 변동
+
+                    alternative_stocks.append(surge_metric.stock_code)
+                    self.logger.info(f"🎯 대안 종목 선정: {surge_metric.stock_name}({surge_metric.stock_code}) "
+                                   f"점수:{surge_metric.surge_score:.1f}, 등락률:{surge_metric.daily_change_pct:.2f}%")
+
+                    if len(alternative_stocks) >= 3:  # 최대 3개까지
+                        break
+
+            return alternative_stocks
+
+        except Exception as e:
+            self.logger.error(f"대안 종목 발굴 오류: {e}")
+            return []
     
     async def _calculate_volume_ratio(self, stock_code: str) -> float:
         """거래량 비율 계산 (당일 vs 평균)"""
