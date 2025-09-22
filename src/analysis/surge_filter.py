@@ -46,11 +46,11 @@ class SurgeFilter:
             # 변동성 계산
             price_volatility = await self._calculate_price_volatility(stock_code)
             
-            # 급등주 판단 기준 - 더 유연하게 조정
+            # 급등주 판단 기준 - 대폭 완화하여 거래 기회 확대
             surge_config = config.get('surge_filter', {})
-            max_daily_change = surge_config.get('max_daily_change', 7.0)  # 10% → 7%로 완화
-            max_volume_ratio = surge_config.get('max_volume_ratio', 8.0)  # 5배 → 8배로 완화
-            max_volatility = surge_config.get('max_volatility', 25.0)  # 30 → 25로 강화
+            max_daily_change = surge_config.get('max_daily_change', 12.0)  # 7% → 12%로 대폭 완화
+            max_volume_ratio = surge_config.get('max_volume_ratio', 15.0)  # 8배 → 15배로 대폭 완화
+            max_volatility = surge_config.get('max_volatility', 30.0)  # 25 → 30으로 완화
 
             # 시간대별 완화 적용
             current_hour = datetime.now().hour
@@ -94,21 +94,31 @@ class SurgeFilter:
         """급등주 필터링"""
         if not config.get('surge_filter', {}).get('enable_surge_filter', False):
             return stock_codes
-            
+
         filtered_stocks = []
+        all_metrics = []  # 모든 종목의 급등 분석 결과 저장
         surge_config = config.get('surge_filter', {})
-        max_surge_score = surge_config.get('max_surge_score', 70.0)
-        
+        max_surge_score = surge_config.get('max_surge_score', 85.0)  # 70 → 85로 완화
+
         self.logger.info(f"🚫 급등주 필터링 시작: {len(stock_codes)}개 종목")
-        
+
         for stock_code in stock_codes:
             try:
                 metrics = await self.analyze_surge_risk(stock_code, config)
-                
+
                 if metrics:
-                    if not metrics.is_surge_stock and metrics.surge_score <= max_surge_score:
+                    all_metrics.append(metrics)  # 모든 분석 결과 저장
+
+                    # 기본 필터링 - 대폭 완화된 기준 적용
+                    basic_pass = not metrics.is_surge_stock and metrics.surge_score <= max_surge_score
+
+                    # 선별적 급등주 허용 로직 - 강한 상승 모멘텀이 있는 경우 예외 적용
+                    momentum_exception = await self._check_momentum_exception(stock_code, metrics, config)
+
+                    if basic_pass or momentum_exception:
                         filtered_stocks.append(stock_code)
-                        self.logger.info(f"✅ 통과: {metrics.stock_name}({stock_code}) - 급등점수 {metrics.surge_score:.1f}")
+                        reason = "기본통과" if basic_pass else "모멘텀예외"
+                        self.logger.info(f"✅ 통과: {metrics.stock_name}({stock_code}) - {reason} (급등점수 {metrics.surge_score:.1f})")
                     else:
                         self.logger.warning(f"🚫 제외: {metrics.stock_name}({stock_code}) - "
                                           f"급등위험 (점수: {metrics.surge_score:.1f}, "
@@ -116,15 +126,18 @@ class SurgeFilter:
                                           f"거래량: {metrics.volume_ratio:.1f}배)")
                 else:
                     self.logger.warning(f"🚫 제외: {stock_code} - 데이터 조회 실패")
-                    
+
             except Exception as e:
                 self.logger.error(f"급등 필터링 오류 {stock_code}: {e}")
-        
+
         # 필터링된 종목이 너무 적으면 대안 종목 추가
         if len(filtered_stocks) < max(1, len(stock_codes) * 0.3):  # 30% 미만이면
-            alternative_stocks = await self._find_alternative_stocks(filtered_results, config)
-            filtered_stocks.extend(alternative_stocks)
-            self.logger.info(f"🔄 대안 종목 {len(alternative_stocks)}개 추가")
+            try:
+                alternative_stocks = await self._find_alternative_stocks(all_metrics, config)
+                filtered_stocks.extend(alternative_stocks)
+                self.logger.info(f"🔄 대안 종목 {len(alternative_stocks)}개 추가")
+            except Exception as e:
+                self.logger.error(f"대안 종목 찾기 실패: {e}")
 
         self.logger.info(f"🎯 급등주 필터링 완료: {len(stock_codes)}개 → {len(filtered_stocks)}개")
         return filtered_stocks
@@ -154,7 +167,49 @@ class SurgeFilter:
         except Exception as e:
             self.logger.error(f"대안 종목 발굴 오류: {e}")
             return []
-    
+
+    async def _check_momentum_exception(self, stock_code: str, metrics: SurgeMetrics, config: Dict) -> bool:
+        """강한 상승 모멘텀이 있는 급등주의 경우 거래 허용"""
+        try:
+            # 모멘텀 예외 조건들
+            conditions = []
+
+            # 1. 적당한 급등 + 강한 거래량 (건전한 급등)
+            healthy_surge = (
+                5.0 <= abs(metrics.daily_change_pct) <= 15.0 and  # 적당한 급등폭
+                3.0 <= metrics.volume_ratio <= 20.0 and          # 건전한 거래량
+                metrics.daily_change_pct > 0                     # 상승 중
+            )
+            conditions.append(healthy_surge)
+
+            # 2. 소폭 상승 + 폭증 거래량 (관심종목)
+            attention_stock = (
+                0.5 <= metrics.daily_change_pct <= 8.0 and       # 소폭 상승
+                metrics.volume_ratio >= 5.0                     # 거래량 폭증
+            )
+            conditions.append(attention_stock)
+
+            # 3. 대형주는 더 관대하게 (삼성전자 등)
+            if stock_code in ['005930', '000660', '035420', '005380', '068270']:  # 대형주
+                large_cap_exception = (
+                    abs(metrics.daily_change_pct) <= 20.0 and    # 20% 이내
+                    metrics.volume_ratio >= 1.5                 # 거래량 증가
+                )
+                conditions.append(large_cap_exception)
+
+            # 조건 중 하나라도 만족하면 예외 적용
+            exception_granted = any(conditions)
+
+            if exception_granted:
+                self.logger.info(f"🎯 모멘텀 예외 적용: {metrics.stock_name}({stock_code}) - "
+                               f"등락률: {metrics.daily_change_pct:.2f}%, 거래량: {metrics.volume_ratio:.1f}배")
+
+            return exception_granted
+
+        except Exception as e:
+            self.logger.error(f"모멘텀 예외 검사 실패 {stock_code}: {e}")
+            return False
+
     async def _calculate_volume_ratio(self, stock_code: str) -> float:
         """거래량 비율 계산 (당일 vs 평균)"""
         try:

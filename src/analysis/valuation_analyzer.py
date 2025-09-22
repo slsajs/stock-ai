@@ -67,17 +67,17 @@ class ValuationAnalyzer:
                 current_price=current_price
             )
             
-            # PBR 계산
-            metrics.pbr = await self.api_client.calculate_pbr(stock_code)
-            
-            # PER 계산
-            metrics.per = await self.api_client.calculate_per(stock_code)
-            
-            # ROE 계산
-            metrics.roe = await self.api_client.calculate_roe(stock_code)
-            
-            # PSR 계산
-            metrics.psr = await self.api_client.calculate_psr(stock_code)
+            # PBR 계산 (캐싱 적용)
+            metrics.pbr = await self.api_client.get_pbr_cached(stock_code)
+
+            # PER 계산 (캐싱 적용)
+            metrics.per = await self.api_client.get_per_cached(stock_code)
+
+            # ROE 계산 (캐싱 적용)
+            metrics.roe = await self.api_client.get_roe_cached(stock_code)
+
+            # PSR 계산 (캐싱 적용)
+            metrics.psr = await self.api_client.get_psr_cached(stock_code)
             
             # 시가총액 계산 (대략적)
             try:

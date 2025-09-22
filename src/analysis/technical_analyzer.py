@@ -112,8 +112,8 @@ class TechnicalAnalyzer:
         return rsi is not None and rsi < 30
     
     def is_overbought(self, rsi: float) -> bool:
-        """과매수 구간 판단"""
-        return rsi is not None and rsi > 70
+        """과매수 구간 판단 - 기준 완화"""
+        return rsi is not None and rsi > 85  # 70 → 85로 상향
     
     def calculate_momentum(self, prices: List[float], period: int = 5) -> Optional[float]:
         """모멘텀 지표 계산"""

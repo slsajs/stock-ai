@@ -42,7 +42,7 @@ class StopLossManager:
                  default_stop_loss_pct: float = 0.02,  # 기본 손절 2%
                  default_take_profit_pct: float = 0.03,  # 기본 익절 3%
                  trailing_stop_pct: float = 0.015,  # 트레일링 스탑 1.5%
-                 max_position_time: int = 30):  # 최대 보유 시간 30분
+                 max_position_time: int = 45):  # 최대 보유 시간 45분
         
         self.positions: Dict[str, PositionInfo] = {}
         self.default_stop_loss_pct = default_stop_loss_pct

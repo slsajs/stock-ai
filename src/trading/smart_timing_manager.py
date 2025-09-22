@@ -36,11 +36,15 @@ class SmartTimingManager:
         self.extreme_volatility_threshold = timing_config.get('extreme_volatility_threshold', 30.0)  # 35 → 30으로 강화
 
         # 급등 회피 설정 - 더 보수적으로 설정
-        self.max_surge_change = timing_config.get('max_surge_change', 10.0)  # 15% → 10%로 강화
-        self.volume_spike_threshold = timing_config.get('volume_spike_threshold', 3.0)  # 5배 → 3배로 강화
+        self.max_surge_change = timing_config.get('max_surge_change', 12.0)  # config.json에서 설정
+        self.volume_spike_threshold = timing_config.get('volume_spike_threshold', 3.5)  # config.json에서 설정
+
+        # 거래량 폭증 쿨다운 설정
+        self.volume_cooldown_minutes = timing_config.get('volume_cooldown_minutes', 10)  # 10분 쿨다운
+        self.volume_spike_history = {}  # 종목별 거래량 폭증 기록
 
         # 시간별 포지션 관리 설정 추가
-        self.max_position_hold_minutes = timing_config.get('max_position_hold_minutes', 20)  # 30분 → 20분으로 단축
+        self.min_holding_minutes = timing_config.get('min_holding_minutes', 45)  # 최소 홀딩 시간 45분
         self.profit_taking_time_minutes = timing_config.get('profit_taking_time_minutes', 15)  # 15분 후 수익시 매도 고려
 
         # 시장 상황 기준
@@ -181,11 +185,37 @@ class SmartTimingManager:
                 risk_level="HIGH"
             )
         
-        # 거래량 급증 체크
+        # 거래량 급증 체크 (강화된 로직)
+        current_time = datetime.now()
+
+        # 거래량 폭증 기록 확인
+        if stock_code in self.volume_spike_history:
+            last_spike_time = self.volume_spike_history[stock_code]
+            time_since_spike = (current_time - last_spike_time).total_seconds() / 60
+
+            if time_since_spike < self.volume_cooldown_minutes:
+                return TimingCondition(
+                    is_trading_allowed=False,
+                    reason=f"거래량 폭증 쿨다운 중 (남은시간: {self.volume_cooldown_minutes - time_since_spike:.0f}분)",
+                    risk_level="MEDIUM"
+                )
+
+        # 현재 거래량 급증 체크
         if volume_ratio >= self.volume_spike_threshold:
+            # 거래량 폭증 기록
+            self.volume_spike_history[stock_code] = current_time
+
             return TimingCondition(
                 is_trading_allowed=False,
-                reason=f"거래량 급증 회피 (거래량: {volume_ratio:.1f}배)",
+                reason=f"거래량 급증 회피 (거래량: {volume_ratio:.1f}배, {self.volume_cooldown_minutes}분 대기)",
+                risk_level="HIGH"
+            )
+
+        # 중간 수준 거래량 증가도 경고
+        elif volume_ratio >= 2.5:
+            return TimingCondition(
+                is_trading_allowed=True,
+                reason=f"거래량 증가 주의 (거래량: {volume_ratio:.1f}배)",
                 risk_level="MEDIUM"
             )
         

@@ -16,6 +16,8 @@ try:
 except ImportError:
     CRYPTO_AVAILABLE = False
 
+from ..cache.financial_data_manager import FinancialDataManager
+
 logger = logging.getLogger(__name__)
 
 class KISAPIClient:
@@ -35,10 +37,17 @@ class KISAPIClient:
         self.encryption_iv = None
         
         self.rate_limiter = asyncio.Semaphore(20)  # 초당 20회 제한
-        
+
+        # 캐싱 및 폴백 로직을 위한 데이터 매니저
+        self.data_manager = None
+
     async def __aenter__(self):
         self.session = aiohttp.ClientSession()
         await self.get_access_token()
+
+        # 데이터 매니저 초기화
+        self.data_manager = FinancialDataManager(self)
+
         return self
     
     async def __aexit__(self, exc_type, exc_val, exc_tb):
@@ -876,3 +885,43 @@ class KISAPIClient:
         except Exception as e:
             logger.error(f"Error calculating PSR for {stock_code}: {e}")
             return None
+
+    # 캐싱 및 폴백 로직이 적용된 메서드들
+    async def get_per_cached(self, stock_code: str) -> Optional[float]:
+        """PER 조회 (캐싱 + 폴백 로직 적용)"""
+        if self.data_manager:
+            return await self.data_manager.get_per_with_fallback(stock_code)
+        else:
+            return await self.calculate_per(stock_code)
+
+    async def get_roe_cached(self, stock_code: str) -> Optional[float]:
+        """ROE 조회 (캐싱 + 폴백 로직 적용)"""
+        if self.data_manager:
+            return await self.data_manager.get_roe_with_fallback(stock_code)
+        else:
+            return await self.calculate_roe(stock_code)
+
+    async def get_psr_cached(self, stock_code: str) -> Optional[float]:
+        """PSR 조회 (캐싱 + 폴백 로직 적용)"""
+        if self.data_manager:
+            return await self.data_manager.get_psr_with_fallback(stock_code)
+        else:
+            return await self.calculate_psr(stock_code)
+
+    async def get_pbr_cached(self, stock_code: str) -> Optional[float]:
+        """PBR 조회 (캐싱 + 폴백 로직 적용)"""
+        if self.data_manager:
+            return await self.data_manager.get_pbr_with_fallback(stock_code)
+        else:
+            return await self.calculate_pbr(stock_code)
+
+    def get_cache_stats(self) -> Dict:
+        """캐시 통계 조회"""
+        if self.data_manager:
+            return self.data_manager.get_cache_stats()
+        return {'total': 0, 'valid': 0, 'expired': 0}
+
+    def cleanup_cache(self):
+        """만료된 캐시 정리"""
+        if self.data_manager:
+            self.data_manager.cleanup_cache()

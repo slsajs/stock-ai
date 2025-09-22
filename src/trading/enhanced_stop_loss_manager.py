@@ -89,16 +89,143 @@ class EnhancedStopLossManager:
         return dynamic_stop_loss
 
     def _get_dynamic_trailing_stop_pct(self, stock_code: str, current_price: float) -> float:
-        """변동성 기반 동적 트레일링스탑률 계산"""
+        """최적화된 동적 트레일링스탑률 계산"""
+        if stock_code not in self.positions:
+            return self.base_trailing_stop_pct
+
+        position = self.positions[stock_code]
+
+        # 1. 현재 수익률 계산
+        profit_pct = ((current_price - position.avg_price) / position.avg_price) * 100
+
+        # 2. 보유 시간 계산 (분)
+        from datetime import datetime
+        holding_minutes = (datetime.now() - position.purchase_time).total_seconds() / 60
+
+        # 3. 수익률 기반 트레일링스탑 (가장 중요)
+        if profit_pct < 0.5:
+            # 수익이 거의 없을 때는 트레일링 비활성화
+            profit_based_trailing = 99.0  # 사실상 비활성화
+        elif profit_pct < 1.0:
+            profit_based_trailing = 2.8  # 매우 완화
+        elif profit_pct < 2.0:
+            profit_based_trailing = 2.2  # 완화
+        elif profit_pct < 3.0:
+            profit_based_trailing = 1.8  # 기본
+        else:
+            profit_based_trailing = 1.5  # 큰 수익일 때 강화
+
+        # 4. 시간 기반 완화 (초기 변동성 고려) - 더 세밀한 조정
+        if holding_minutes < 2:
+            time_based_adjustment = 1.5  # 초기 2분은 매우 완화
+        elif holding_minutes < 5:
+            time_based_adjustment = 1.0  # 5분까지 완화
+        elif holding_minutes < 10:
+            time_based_adjustment = 0.8  # 10분까지 점진적 완화
+        elif holding_minutes < 15:
+            time_based_adjustment = 0.6  # 15분까지 완화
+        elif holding_minutes < 25:
+            time_based_adjustment = 0.4  # 25분까지 완화
+        elif holding_minutes < 40:
+            time_based_adjustment = 0.2  # 40분까지 소폭 완화
+        else:
+            # 장시간 보유 시 시장 상황에 따른 조정
+            current_hour = datetime.now().hour
+            if current_hour >= 14:  # 장 마감 1시간 전
+                time_based_adjustment = -0.3  # 강화로 리스크 관리
+            else:
+                time_based_adjustment = 0.0  # 완화 없음
+
+        # 5. 변동성 기반 조정
         volatility = self._calculate_volatility(stock_code, current_price)
-        dynamic_trailing = self.base_trailing_stop_pct * (1 + volatility * self.volatility_multiplier)
+        volatility_adjustment = volatility * 0.5  # 변동성 50% 반영
 
-        # 최소 0.5%, 최대 3% 제한
-        dynamic_trailing = max(0.5, min(3.0, dynamic_trailing))
+        # 6. 종목별 특성 조정
+        stock_adjustment = self._get_stock_specific_adjustment(stock_code, current_price)
 
-        self.logger.debug(f"{stock_code} 동적 트레일링: {dynamic_trailing:.2f}% (변동성: {volatility:.3f})")
-        return dynamic_trailing
-    
+        # 7. 급격한 가격 변동 조정
+        rapid_movement_adjustment = self._handle_rapid_price_movement(stock_code, current_price)
+
+        # 8. 최종 트레일링스탑 계산
+        final_trailing = (profit_based_trailing + time_based_adjustment +
+                         volatility_adjustment + stock_adjustment + rapid_movement_adjustment)
+
+        # 9. 합리적 범위로 제한
+        final_trailing = max(1.0, min(5.0, final_trailing))
+
+        self.logger.debug(f"{stock_code} 최적화 트레일링: {final_trailing:.2f}% "
+                         f"(수익률:{profit_pct:.1f}%, 시간:{holding_minutes:.0f}분, 변동성:{volatility:.3f}, "
+                         f"조정: 시간+{time_based_adjustment:.1f}% 종목+{stock_adjustment:.1f}% "
+                         f"급변동+{rapid_movement_adjustment:.1f}%)")
+
+        return final_trailing
+
+    def _get_stock_specific_adjustment(self, stock_code: str, current_price: float) -> float:
+        """종목별 특성을 고려한 트레일링스탑 조정"""
+        adjustment = 0.0
+
+        # 1. 가격대별 조정
+        if current_price < 5000:  # 소액주
+            adjustment += 0.3  # 변동성이 높으므로 완화
+        elif current_price < 10000:  # 중저가주
+            adjustment += 0.2
+        elif current_price > 50000:  # 고가주 (대형주)
+            adjustment -= 0.2  # 안정적이므로 강화
+
+        # 2. 종목코드별 특성 (과거 패턴 기반)
+        if stock_code.startswith('005'):  # 삼성 계열
+            adjustment -= 0.1  # 안정적
+        elif stock_code.startswith('000'):  # SK 계열
+            adjustment -= 0.1  # 안정적
+        elif stock_code.startswith('035'):  # 네이버 등 IT
+            adjustment += 0.2  # 변동성 높음
+        elif stock_code.startswith(('20', '30', '31', '32')):  # 코스닥
+            adjustment += 0.3  # 변동성 매우 높음
+
+        # 3. 특정 문제 종목 개별 조정 (최근 손실 패턴 기반)
+        problem_stocks = {
+            '317830': 0.8,  # 연속 손실로 대폭 완화 필요
+            '201490': 0.4,  # 중간 완화
+            '462860': 0.3,  # 소액주 특성으로 완화
+            '293490': 0.3,  # 카카오 게임즈 - 변동성 고려
+            '035900': 0.2,  # JYP 엔터 - 엔터테인먼트 특성
+        }
+
+        if stock_code in problem_stocks:
+            adjustment += problem_stocks[stock_code]
+            self.logger.debug(f"{stock_code} 문제 종목 조정: +{problem_stocks[stock_code]:.1f}%")
+
+        return adjustment
+
+    def _calculate_rsi_based_adjustment(self, stock_code: str, current_price: float) -> float:
+        """RSI 기반 트레일링스탑 조정 (향후 RSI 데이터 연동 시 사용)"""
+        # 현재는 기본값 반환, 향후 RSI 데이터와 연동
+        return 0.0
+
+    def _handle_rapid_price_movement(self, stock_code: str, current_price: float) -> float:
+        """급격한 가격 변동 시 트레일링스탑 조정"""
+        if stock_code not in self.positions:
+            return 0.0
+
+        position = self.positions[stock_code]
+
+        # 1분 내 급격한 변동 감지 (간단한 구현)
+        price_change_pct = abs((current_price - position.avg_price) / position.avg_price) * 100
+
+        adjustment = 0.0
+
+        # 급격한 상승 시 (5% 이상)
+        if price_change_pct > 5.0 and current_price > position.avg_price:
+            adjustment += 0.5  # 트레일링 완화로 이익 보호
+            self.logger.debug(f"{stock_code} 급등 감지: +0.5% 트레일링 완화")
+
+        # 급격한 하락 시 (3% 이상)
+        elif price_change_pct > 3.0 and current_price < position.avg_price:
+            adjustment -= 0.3  # 트레일링 강화로 손실 제한
+            self.logger.debug(f"{stock_code} 급락 감지: -0.3% 트레일링 강화")
+
+        return adjustment
+
     async def start_monitoring(self):
         """모니터링 시작"""
         if self.is_running:
@@ -156,9 +283,18 @@ class EnhancedStopLossManager:
         # 최고가 업데이트 (트레일링 스톱용)
         if current_price > position.max_price_seen:
             position.max_price_seen = current_price
-            # 트레일링 스톱 가격 업데이트
-            if current_price > position.avg_price * 1.02:  # 2% 이상 상승시 트레일링 활성화
-                position.trailing_stop_price = current_price * (1 - self.trailing_stop_pct / 100)
+            # 트레일링 스톱 가격 업데이트 (개선된 조건)
+            profit_pct = ((current_price - position.avg_price) / position.avg_price) * 100
+
+            # 수익률 기반 트레일링 활성화 조건
+            if profit_pct > 0.3:  # 0.3% 이상 수익 시 트레일링 활성화
+                trailing_stop_pct = self._get_dynamic_trailing_stop_pct(position.stock_code, current_price)
+
+                # 수익이 적을 때는 트레일링 비활성화
+                if trailing_stop_pct < 50:  # 99.0이 아닌 정상적인 값일 때만
+                    position.trailing_stop_price = current_price * (1 - trailing_stop_pct / 100)
+                    self.logger.debug(f"{position.stock_code} 트레일링 업데이트: {trailing_stop_pct:.2f}% "
+                                    f"(현재가: {current_price}, 트레일링가: {position.trailing_stop_price:.0f})")
         
         # 손익률 계산
         profit_loss_pct = ((current_price - position.avg_price) / position.avg_price) * 100
