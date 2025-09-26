@@ -35,8 +35,16 @@ class KISAPIClient:
         self.websocket = None
         self.encryption_key = None
         self.encryption_iv = None
-        
+
         self.rate_limiter = asyncio.Semaphore(20)  # 초당 20회 제한
+
+        # WebSocket 연결 안정성 관련 변수
+        self.ws_reconnect_attempts = 0
+        self.max_reconnect_attempts = 5
+        self.reconnect_delay = 5  # 초
+        self.is_reconnecting = False
+        self.last_heartbeat = None
+        self.heartbeat_interval = 30  # 30초마다 heartbeat
 
         # 캐싱 및 폴백 로직을 위한 데이터 매니저
         self.data_manager = None
@@ -51,8 +59,10 @@ class KISAPIClient:
         return self
     
     async def __aexit__(self, exc_type, exc_val, exc_tb):
-        if self.websocket:
-            await self.websocket.close()
+        # WebSocket 정리
+        await self.close_websocket()
+
+        # HTTP 세션 정리
         if self.session:
             await self.session.close()
     
@@ -413,23 +423,87 @@ class KISAPIClient:
                 return None
     
     async def connect_websocket(self, approval_key: str = None):
-        """WebSocket 연결"""
+        """WebSocket 연결 (자동 재연결 지원)"""
         try:
             if not approval_key:
                 approval_key = await self.get_websocket_approval_key()
                 if not approval_key:
                     raise Exception("Failed to get WebSocket approval key")
-            
+
             self.approval_key = approval_key
             logger.debug(f"Using approval key: {approval_key}")
             logger.debug(f"Attempting WebSocket connection to: {self.ws_url}")
-            self.websocket = await websockets.connect(self.ws_url)
+
+            # WebSocket 연결 옵션 설정
+            extra_headers = {
+                "User-Agent": "Python-KIS-API/1.0"
+            }
+
+            # ping/pong 설정으로 연결 유지
+            self.websocket = await websockets.connect(
+                self.ws_url,
+                extra_headers=extra_headers,
+                ping_interval=20,  # 20초마다 ping
+                ping_timeout=10,   # ping 응답 대기시간 10초
+                close_timeout=10   # 연결 종료 대기시간 10초
+            )
+
             logger.info("WebSocket connected successfully")
             logger.debug(f"WebSocket state: {self.websocket.state}")
+
+            # 연결 성공 시 재연결 카운터 리셋
+            self.ws_reconnect_attempts = 0
+            self.is_reconnecting = False
+            self.last_heartbeat = datetime.now()
+
         except Exception as e:
             logger.error(f"WebSocket connection failed: {e}")
             logger.debug(f"WebSocket URL: {self.ws_url}")
             raise
+
+    async def _reconnect_websocket(self):
+        """WebSocket 자동 재연결"""
+        if self.is_reconnecting:
+            return
+
+        self.is_reconnecting = True
+
+        while self.ws_reconnect_attempts < self.max_reconnect_attempts:
+            try:
+                self.ws_reconnect_attempts += 1
+                wait_time = min(self.reconnect_delay * self.ws_reconnect_attempts, 60)
+
+                logger.warning(f"WebSocket reconnection attempt {self.ws_reconnect_attempts}/{self.max_reconnect_attempts} in {wait_time}s")
+                await asyncio.sleep(wait_time)
+
+                # 기존 연결 정리
+                if self.websocket:
+                    try:
+                        await self.websocket.close()
+                    except:
+                        pass
+                    self.websocket = None
+
+                # 재연결 시도
+                await self.connect_websocket()
+                logger.info("WebSocket reconnected successfully")
+                return
+
+            except Exception as e:
+                logger.error(f"WebSocket reconnection attempt {self.ws_reconnect_attempts} failed: {e}")
+                if self.ws_reconnect_attempts >= self.max_reconnect_attempts:
+                    logger.error("Maximum reconnection attempts reached. WebSocket connection abandoned.")
+                    break
+
+        self.is_reconnecting = False
+
+    def is_websocket_connected(self) -> bool:
+        """WebSocket 연결 상태 확인"""
+        return (
+            self.websocket is not None and
+            not self.websocket.closed and
+            self.websocket.state == websockets.protocol.State.OPEN
+        )
     
     def decrypt_data(self, encrypted_data: str) -> str:
         """WebSocket 데이터 복호화"""
@@ -463,31 +537,47 @@ class KISAPIClient:
             return encrypted_data
     
     async def subscribe_realtime_price(self, stock_codes: List[str]):
-        """실시간 현재가 구독"""
-        if not self.websocket:
-            raise Exception("WebSocket not connected")
-        
+        """실시간 현재가 구독 (연결 상태 확인 포함)"""
+        if not self.is_websocket_connected():
+            logger.warning("WebSocket not connected, attempting reconnection...")
+            await self._reconnect_websocket()
+
+        if not self.is_websocket_connected():
+            raise Exception("WebSocket connection failed after reconnection attempts")
+
         logger.debug(f"Subscribing to {len(stock_codes)} stock codes: {stock_codes}")
-        
+
         for stock_code in stock_codes:
-            subscribe_data = {
-                "header": {
-                    "approval_key": getattr(self, 'approval_key', self.app_key),
-                    "custtype": "P",
-                    "tr_type": "1",
-                    "content-type": "utf-8"
-                },
-                "body": {
-                    "input": {
-                        "tr_id": "H0STCNT0",
-                        "tr_key": stock_code
+            try:
+                subscribe_data = {
+                    "header": {
+                        "approval_key": getattr(self, 'approval_key', self.app_key),
+                        "custtype": "P",
+                        "tr_type": "1",
+                        "content-type": "utf-8"
+                    },
+                    "body": {
+                        "input": {
+                            "tr_id": "H0STCNT0",
+                            "tr_key": stock_code
+                        }
                     }
                 }
-            }
-            
-            logger.debug(f"Sending subscription data for {stock_code}: {json.dumps(subscribe_data, indent=2)}")
-            await self.websocket.send(json.dumps(subscribe_data))
-            logger.info(f"Subscribed to real-time price for {stock_code}")
+
+                logger.debug(f"Sending subscription data for {stock_code}: {json.dumps(subscribe_data, indent=2)}")
+                await self.websocket.send(json.dumps(subscribe_data))
+                logger.info(f"Subscribed to real-time price for {stock_code}")
+
+                # 구독 간 짧은 대기
+                await asyncio.sleep(0.1)
+
+            except Exception as e:
+                logger.error(f"Failed to subscribe to {stock_code}: {e}")
+                # 연결 문제가 의심되면 재연결 시도
+                if "connection" in str(e).lower() or "closed" in str(e).lower():
+                    logger.warning("Connection issue detected, attempting reconnection...")
+                    await self._reconnect_websocket()
+                raise
     
     def _parse_realtime_data(self, data_str: str) -> Dict:
         """실시간 파이프 구분 데이터 파싱"""
@@ -546,99 +636,210 @@ class KISAPIClient:
             return None
 
     async def listen_websocket(self, callback):
-        """WebSocket 메시지 수신"""
-        if not self.websocket:
+        """WebSocket 메시지 수신 (연결 모니터링 및 자동 재연결 포함)"""
+        if not self.is_websocket_connected():
             raise Exception("WebSocket not connected")
-        
-        logger.info("Starting WebSocket message listener")
+
+        logger.info("Starting WebSocket message listener with auto-reconnection")
         message_count = 0
-        
-        try:
-            async for message in self.websocket:
-                message_count += 1
-                logger.debug(f"Received WebSocket message #{message_count}")
-                logger.debug(f"Message type: {type(message)}, length: {len(message) if message else 0}")
-                
-                if message:
-                    logger.debug(f"Raw message (first 200 chars): {str(message)}...")
-                
-                # 빈 메시지나 ping/pong 메시지 무시
-                if not message or message in ['ping', 'pong']:
-                    logger.debug(f"Ignoring empty or ping/pong message #{message_count}")
-                    continue
-                
-                # 여러 JSON 객체가 연결된 경우 처리
-                message_str = str(message).strip()
-                if message_str.count('{') > 1:
-                    logger.debug(f"Message contains multiple JSON objects, processing first one")
-                    # 첫 번째 완전한 JSON 객체만 추출
-                    brace_count = 0
-                    first_json_end = 0
-                    for i, char in enumerate(message_str):
-                        if char == '{':
-                            brace_count += 1
-                        elif char == '}':
-                            brace_count -= 1
-                            if brace_count == 0:
-                                first_json_end = i + 1
-                                break
-                    if first_json_end > 0:
-                        message_str = message_str[:first_json_end]
-                
-                # JSON 메시지 처리 시도
+        last_message_time = datetime.now()
+
+        while True:
+            try:
+                # 연결 상태 확인
+                if not self.is_websocket_connected():
+                    logger.warning("WebSocket connection lost, attempting reconnection...")
+                    await self._reconnect_websocket()
+                    if not self.is_websocket_connected():
+                        logger.error("Failed to reconnect WebSocket")
+                        break
+
+                # Heartbeat 체크
+                await self._check_heartbeat()
+
+                # 메시지 수신 (타임아웃 설정)
                 try:
-                    data = json.loads(message_str)
-                    logger.debug(f"Parsed JSON data keys: {list(data.keys()) if isinstance(data, dict) else 'Not a dict'}")
-                    
-                    # 구독 성공 메시지에서 암호화 키 저장
-                    if isinstance(data, dict) and data.get('body', {}).get('msg1') == 'SUBSCRIBE SUCCESS':
-                        output = data.get('body', {}).get('output', {})
-                        if 'key' in output and 'iv' in output:
-                            self.encryption_key = output['key']
-                            self.encryption_iv = output['iv']
-                            logger.info("Encryption key/iv obtained from subscribe success message")
-                            logger.debug(f"Key: {self.encryption_key}, IV: {self.encryption_iv}")
-                        # 구독 성공 메시지는 콜백 호출하지 않음
+                    message = await asyncio.wait_for(self.websocket.recv(), timeout=30.0)
+                    message_count += 1
+                    last_message_time = datetime.now()
+
+                    logger.debug(f"Received WebSocket message #{message_count}")
+                    logger.debug(f"Message type: {type(message)}, length: {len(message) if message else 0}")
+
+                    if message:
+                        logger.debug(f"Raw message (first 200 chars): {str(message)[:200]}...")
+
+                    # 빈 메시지나 ping/pong 메시지 무시
+                    if not message or message in ['ping', 'pong']:
+                        logger.debug(f"Ignoring empty or ping/pong message #{message_count}")
                         continue
-                    
-                    # 암호화된 실시간 데이터 처리
-                    elif isinstance(data, dict) and data.get('header', {}).get('encrypt') == 'Y':
-                        logger.debug("Received encrypted real-time data")
-                        if 'body' in data and isinstance(data['body'], str):
-                            decrypted_body = self.decrypt_data(data['body'])
-                            try:
-                                data['body'] = json.loads(decrypted_body)
-                                logger.debug("Successfully decrypted and parsed real-time data")
-                            except json.JSONDecodeError:
-                                logger.warning("Failed to parse decrypted data as JSON")
-                    
-                    # 유의미한 데이터만 콜백 처리
-                    if isinstance(data, dict) and ('header' in data or 'body' in data):
-                        logger.info(f"Processing JSON WebSocket message #{message_count}")
-                        await callback(data)
-                        
-                except json.JSONDecodeError:
-                    # JSON이 아닌 경우 파이프 구분 데이터 파싱 시도
-                    if '|' in message_str:
-                        logger.debug(f"Attempting to parse pipe-separated data #{message_count}")
-                        parsed_data = self._parse_realtime_data(message_str)
-                        if parsed_data:
-                            logger.info(f"Processing realtime data for {parsed_data.get('stock_code', 'unknown')}: {parsed_data.get('current_price', 0)}")
-                            await callback(parsed_data)
+
+                    # 여러 JSON 객체가 연결된 경우 처리
+                    message_str = str(message).strip()
+                    if message_str.count('{') > 1:
+                        logger.debug(f"Message contains multiple JSON objects, processing first one")
+                        # 첫 번째 완전한 JSON 객체만 추출
+                        brace_count = 0
+                        first_json_end = 0
+                        for i, char in enumerate(message_str):
+                            if char == '{':
+                                brace_count += 1
+                            elif char == '}':
+                                brace_count -= 1
+                                if brace_count == 0:
+                                    first_json_end = i + 1
+                                    break
+                        if first_json_end > 0:
+                            message_str = message_str[:first_json_end]
+
+                    # JSON 메시지 처리 시도
+                    try:
+                        data = json.loads(message_str)
+                        logger.debug(f"Parsed JSON data keys: {list(data.keys()) if isinstance(data, dict) else 'Not a dict'}")
+
+                        # 구독 성공 메시지에서 암호화 키 저장
+                        if isinstance(data, dict) and data.get('body', {}).get('msg1') == 'SUBSCRIBE SUCCESS':
+                            output = data.get('body', {}).get('output', {})
+                            if 'key' in output and 'iv' in output:
+                                self.encryption_key = output['key']
+                                self.encryption_iv = output['iv']
+                                logger.info("Encryption key/iv obtained from subscribe success message")
+                                logger.debug(f"Key: {self.encryption_key}, IV: {self.encryption_iv}")
+                            # 구독 성공 메시지는 콜백 호출하지 않음
+                            continue
+
+                        # 암호화된 실시간 데이터 처리
+                        elif isinstance(data, dict) and data.get('header', {}).get('encrypt') == 'Y':
+                            logger.debug("Received encrypted real-time data")
+                            if 'body' in data and isinstance(data['body'], str):
+                                decrypted_body = self.decrypt_data(data['body'])
+                                try:
+                                    data['body'] = json.loads(decrypted_body)
+                                    logger.debug("Successfully decrypted and parsed real-time data")
+                                except json.JSONDecodeError:
+                                    logger.warning("Failed to parse decrypted data as JSON")
+
+                        # 유의미한 데이터만 콜백 처리
+                        if isinstance(data, dict) and ('header' in data or 'body' in data):
+                            logger.info(f"Processing JSON WebSocket message #{message_count}")
+                            await callback(data)
+
+                    except json.JSONDecodeError:
+                        # JSON이 아닌 경우 파이프 구분 데이터 파싱 시도
+                        if '|' in message_str:
+                            logger.debug(f"Attempting to parse pipe-separated data #{message_count}")
+                            parsed_data = self._parse_realtime_data(message_str)
+                            if parsed_data:
+                                logger.info(f"Processing realtime data for {parsed_data.get('stock_code', 'unknown')}: {parsed_data.get('current_price', 0)}")
+                                await callback(parsed_data)
+                            else:
+                                logger.debug(f"Failed to parse realtime data #{message_count}")
                         else:
-                            logger.debug(f"Failed to parse realtime data #{message_count}")
-                    else:
-                        logger.debug(f"Skipping non-JSON/non-pipe message #{message_count}: {message_str[:50]}...")
-                        
-                except Exception as e:
-                    logger.error(f"Error processing WebSocket message #{message_count}: {e}")
-                    
-        except websockets.exceptions.ConnectionClosed as e:
-            logger.warning(f"WebSocket connection closed: {e}")
-        except Exception as e:
-            logger.error(f"WebSocket listener error: {e}")
-            logger.debug(f"Total messages processed: {message_count}")
-    
+                            logger.debug(f"Skipping non-JSON/non-pipe message #{message_count}: {message_str[:50]}...")
+
+                    except Exception as e:
+                        logger.error(f"Error processing WebSocket message #{message_count}: {e}")
+
+                except asyncio.TimeoutError:
+                    # 30초 동안 메시지가 없으면 연결 상태 의심
+                    time_since_last = (datetime.now() - last_message_time).total_seconds()
+                    if time_since_last > 60:  # 1분 이상 메시지 없음
+                        logger.warning(f"No messages received for {time_since_last:.0f}s, checking connection...")
+                        if not self.is_websocket_connected():
+                            logger.warning("Connection lost, attempting reconnection...")
+                            await self._reconnect_websocket()
+                    continue
+
+            except websockets.exceptions.ConnectionClosed as e:
+                logger.warning(f"WebSocket connection closed: {e}")
+                await self._reconnect_websocket()
+                continue
+
+            except Exception as e:
+                logger.error(f"WebSocket listener error: {e}")
+                logger.debug(f"Total messages processed: {message_count}")
+
+                # 심각한 오류인 경우 재연결 시도
+                if "connection" in str(e).lower() or "closed" in str(e).lower():
+                    await self._reconnect_websocket()
+                    continue
+                else:
+                    # 다른 오류는 짧은 대기 후 계속
+                    await asyncio.sleep(1)
+                    continue
+
+        logger.info(f"WebSocket listener stopped. Total messages processed: {message_count}")
+
+    async def _check_heartbeat(self):
+        """Heartbeat 상태 확인 및 전송"""
+        if not self.last_heartbeat:
+            self.last_heartbeat = datetime.now()
+            return
+
+        time_since_heartbeat = (datetime.now() - self.last_heartbeat).total_seconds()
+
+        if time_since_heartbeat > self.heartbeat_interval:
+            try:
+                if self.is_websocket_connected():
+                    # 간단한 heartbeat 메시지 전송 (ping 형태)
+                    heartbeat_data = {
+                        "header": {
+                            "approval_key": getattr(self, 'approval_key', self.app_key),
+                            "custtype": "P",
+                            "tr_type": "1",
+                            "content-type": "utf-8"
+                        },
+                        "body": {
+                            "input": {
+                                "tr_id": "PINGPONG",
+                                "tr_key": "heartbeat"
+                            }
+                        }
+                    }
+
+                    await self.websocket.send(json.dumps(heartbeat_data))
+                    self.last_heartbeat = datetime.now()
+                    logger.debug("Heartbeat sent to maintain WebSocket connection")
+
+            except Exception as e:
+                logger.warning(f"Failed to send heartbeat: {e}")
+                # heartbeat 실패 시 연결 상태 의심
+                if not self.is_websocket_connected():
+                    logger.warning("Heartbeat failed - connection appears to be lost")
+
+    async def close_websocket(self):
+        """WebSocket 연결 정리"""
+        if self.websocket:
+            try:
+                logger.info("Closing WebSocket connection...")
+                await self.websocket.close()
+                logger.info("WebSocket connection closed")
+            except Exception as e:
+                logger.warning(f"Error closing WebSocket: {e}")
+            finally:
+                self.websocket = None
+                self.encryption_key = None
+                self.encryption_iv = None
+                self.last_heartbeat = None
+                self.ws_reconnect_attempts = 0
+                self.is_reconnecting = False
+
+    def get_websocket_status(self) -> Dict:
+        """WebSocket 연결 상태 정보 반환"""
+        status = {
+            "connected": self.is_websocket_connected(),
+            "reconnect_attempts": self.ws_reconnect_attempts,
+            "is_reconnecting": self.is_reconnecting,
+            "last_heartbeat": self.last_heartbeat.isoformat() if self.last_heartbeat else None,
+            "has_encryption_keys": bool(self.encryption_key and self.encryption_iv)
+        }
+
+        if self.websocket:
+            status["websocket_state"] = str(self.websocket.state)
+            status["websocket_closed"] = self.websocket.closed
+
+        return status
+
     async def get_financial_data(self, stock_code: str) -> Dict:
         """재무정보 조회"""
         # API 호출 제한 적용
@@ -656,11 +857,11 @@ class KISAPIClient:
         return await self._request("GET", url, headers, params)
     
     async def get_stock_overview(self, stock_code: str) -> Dict:
-        """종목 개요 및 재무지표 조회"""
+        """종목 개요 및 재무지표 조회 (DEPRECATED - use get_financial_ratios instead)"""
         # API 호출 제한 적용
         from ..utils.api_throttler import throttler
         await throttler.throttle()
-        
+
         url = f"{self.base_url}/uapi/domestic-stock/v1/quotations/inquire-daily-price"
         headers = self._get_headers("FHKST01010100")
         params = {
@@ -668,95 +869,160 @@ class KISAPIClient:
             "fid_input_iscd": stock_code,
             "fid_org_adj_prc": "0"
         }
-        
+
         return await self._request("GET", url, headers, params)
+
+    async def get_financial_ratios(self, stock_code: str) -> Dict:
+        """재무비율 조회 (PER, PBR, ROE, PSR 등) - 다중 TR_ID 시도"""
+        # API 호출 제한 적용
+        from ..utils.api_throttler import throttler
+        await throttler.throttle()
+
+        # 재무비율 관련 TR_ID 목록 (우선순위 순)
+        tr_ids_to_try = [
+            ("FHKST03010100", "/uapi/domestic-stock/v1/quotations/inquire-daily-itemchartprice"),  # 일봉 데이터 (재무비율 포함 가능)
+            ("FHKST01010100", "/uapi/domestic-stock/v1/quotations/inquire-price"),  # 현재가 시세 (일부 재무비율 포함)
+            ("FHKST66430100", "/uapi/domestic-stock/v1/finance/balance-sheet"),  # 재무제표
+            ("FHKST66430200", "/uapi/domestic-stock/v1/finance/financial-ratio"),  # 원래 시도하던 것
+        ]
+
+        last_error = None
+
+        for tr_id, endpoint in tr_ids_to_try:
+            try:
+                url = f"{self.base_url}{endpoint}"
+                headers = self._get_headers(tr_id)
+
+                if tr_id == "FHKST03010100":
+                    # 일봉 데이터 파라미터
+                    params = {
+                        "fid_cond_mrkt_div_code": "J",
+                        "fid_input_iscd": stock_code,
+                        "fid_input_date_1": datetime.now().strftime("%Y%m%d"),
+                        "fid_input_date_2": datetime.now().strftime("%Y%m%d"),
+                        "fid_period_div_code": "D",
+                        "fid_org_adj_prc": "1"
+                    }
+                elif tr_id == "FHKST01010100":
+                    # 현재가 시세 파라미터
+                    params = {
+                        "fid_cond_mrkt_div_code": "J",
+                        "fid_input_iscd": stock_code
+                    }
+                else:
+                    # 기본 재무 관련 파라미터
+                    params = {
+                        "fid_cond_mrkt_div_code": "J",
+                        "fid_input_iscd": stock_code,
+                        "fid_input_date_1": "",
+                    }
+
+                result = await self._request("GET", url, headers, params)
+
+                if result and result.get('rt_cd') == '0':
+                    logger.debug(f"Financial ratios API success with TR_ID: {tr_id}")
+                    return result
+                else:
+                    logger.debug(f"Financial ratios API failed with TR_ID {tr_id}: {result.get('msg1', 'Unknown error')}")
+                    last_error = result
+
+            except Exception as e:
+                logger.debug(f"Exception with TR_ID {tr_id}: {e}")
+                last_error = {"rt_cd": "1", "msg1": f"Exception: {e}"}
+                continue
+
+        # 모든 TR_ID 실패 시 마지막 에러 반환
+        logger.warning(f"All financial ratio TR_IDs failed for {stock_code}")
+        return last_error or {"rt_cd": "1", "msg1": "All financial ratio APIs failed"}
     
     async def calculate_pbr(self, stock_code: str) -> Optional[float]:
-        """PBR 계산 (주가순자산비율)"""
+        """PBR 계산 (주가순자산비율) - 새로운 재무지표 API 사용"""
         try:
-            # 현재가 조회
+            # 재무비율 API로 직접 조회
+            financial_data = await self.get_financial_ratios(stock_code)
+            if financial_data and financial_data.get('rt_cd') == '0':
+                output = financial_data.get('output', {})
+
+                # PBR이 직접 제공되는지 확인
+                for pbr_key in ['pbr', 'per_pbr', 'stck_pbpr']:
+                    pbr_value = output.get(pbr_key)
+                    if pbr_value and pbr_value != '0' and pbr_value != '-':
+                        try:
+                            pbr = float(pbr_value)
+                            if 0.01 <= pbr <= 15.0:  # 합리적 범위
+                                logger.debug(f"Direct PBR for {stock_code}: {pbr:.2f}")
+                                return pbr
+                        except (ValueError, TypeError):
+                            continue
+
+            # 폴백: 기존 방식으로 계산
+            logger.debug(f"Falling back to manual PBR calculation for {stock_code}")
             price_data = await self.get_current_price(stock_code)
             if not price_data or price_data.get('rt_cd') != '0':
-                logger.warning(f"Failed to get current price for {stock_code}")
                 return None
-            
+
             current_price = float(price_data['output'].get('stck_prpr', 0))
             if current_price <= 0:
                 return None
-            
-            # 재무정보 조회 (대안으로 기본 정보에서 추출)
+
+            # BPS 정보 조회 시도
             overview_data = await self.get_stock_overview(stock_code)
             if overview_data and overview_data.get('rt_cd') == '0':
                 output = overview_data.get('output', {})
-                
-                # PBR이 직접 제공되는지 확인
-                if 'pbr' in output or 'per_pbr' in output:
-                    pbr_value = output.get('pbr') or output.get('per_pbr')
-                    if pbr_value and pbr_value != '0':
-                        return float(pbr_value)
-                
-                # BPS(주당순자산가치)를 이용한 PBR 계산
-                bps = output.get('bps')  # Book Value Per Share
+                bps = output.get('bps')
                 if bps and float(bps) > 0:
                     pbr = current_price / float(bps)
-                    logger.debug(f"Calculated PBR for {stock_code}: {pbr:.2f} (Price: {current_price}, BPS: {bps})")
-                    return pbr
-            
-            logger.warning(f"Could not calculate PBR for {stock_code} - insufficient data")
+                    if 0.01 <= pbr <= 15.0:
+                        logger.debug(f"Calculated PBR for {stock_code}: {pbr:.2f}")
+                        return pbr
+
             return None
-            
+
         except Exception as e:
             logger.error(f"Error calculating PBR for {stock_code}: {e}")
             return None
     
     async def calculate_per(self, stock_code: str) -> Optional[float]:
-        """PER 계산 (주가수익비율)"""
+        """PER 계산 (주가수익비율) - 새로운 재무지표 API 사용"""
         try:
-            # 현재가 조회
+            # 재무비율 API로 직접 조회
+            financial_data = await self.get_financial_ratios(stock_code)
+            if financial_data and financial_data.get('rt_cd') == '0':
+                output = financial_data.get('output', {})
+
+                # PER이 직접 제공되는지 확인
+                for per_key in ['per', 'stck_per', 'per_ratio']:
+                    per_value = output.get(per_key)
+                    if per_value and per_value != '0' and per_value != '-':
+                        try:
+                            per = float(per_value)
+                            if 0.1 <= per <= 300.0:  # 합리적 범위
+                                logger.debug(f"Direct PER for {stock_code}: {per:.2f}")
+                                return per
+                        except (ValueError, TypeError):
+                            continue
+
+            # 폴백: 기존 방식으로 계산
+            logger.debug(f"Falling back to manual PER calculation for {stock_code}")
             price_data = await self.get_current_price(stock_code)
             if not price_data or price_data.get('rt_cd') != '0':
-                logger.warning(f"Failed to get current price for {stock_code}")
                 return None
-            
+
             current_price = float(price_data['output'].get('stck_prpr', 0))
             if current_price <= 0:
                 return None
-            
-            # 종목 개요에서 PER 정보 조회
+
+            # EPS 정보 조회 시도
             overview_data = await self.get_stock_overview(stock_code)
             if overview_data and overview_data.get('rt_cd') == '0':
                 output = overview_data.get('output', {})
-                
-                # PER이 직접 제공되는지 확인
-                if 'per' in output:
-                    per_value = output.get('per')
-                    if per_value and per_value != '0' and per_value != '-':
-                        return float(per_value)
-                
-                # EPS(주당순이익)를 이용한 PER 계산
-                eps = output.get('eps')  # Earnings Per Share
+                eps = output.get('eps')
                 if eps and float(eps) > 0:
                     per = current_price / float(eps)
-                    logger.debug(f"Calculated PER for {stock_code}: {per:.2f} (Price: {current_price}, EPS: {eps})")
-                    return per
-                
-                # 연간 순이익과 상장주식수로 PER 계산 (대안)
-                net_income = output.get('net_income')  # 순이익
-                shares_outstanding = output.get('lstg_st_cnt')  # 상장주식수
-                
-                if net_income and shares_outstanding:
-                    try:
-                        net_income_val = float(net_income)
-                        shares_val = float(shares_outstanding)
-                        if net_income_val > 0 and shares_val > 0:
-                            eps_calculated = net_income_val / shares_val
-                            per = current_price / eps_calculated
-                            logger.debug(f"Calculated PER for {stock_code}: {per:.2f} (from net income)")
-                            return per
-                    except:
-                        pass
-            
-            logger.warning(f"Could not calculate PER for {stock_code} - insufficient data")
+                    if 0.1 <= per <= 300.0:
+                        logger.debug(f"Calculated PER for {stock_code}: {per:.2f}")
+                        return per
+
             return None
             
         except Exception as e:
@@ -764,124 +1030,90 @@ class KISAPIClient:
             return None
     
     async def calculate_roe(self, stock_code: str) -> Optional[float]:
-        """ROE 계산 (자기자본이익률, %)"""
+        """ROE 계산 (자기자본이익률, %) - 새로운 재무지표 API 사용"""
         try:
-            # 종목 개요에서 ROE 정보 조회
+            # 재무비율 API로 직접 조회
+            financial_data = await self.get_financial_ratios(stock_code)
+            if financial_data and financial_data.get('rt_cd') == '0':
+                output = financial_data.get('output', {})
+
+                # ROE가 직접 제공되는지 확인
+                for roe_key in ['roe', 'stck_roe', 'return_on_equity']:
+                    roe_value = output.get(roe_key)
+                    if roe_value and roe_value != '0' and roe_value != '-':
+                        try:
+                            roe = float(roe_value)
+                            if -100.0 <= roe <= 150.0:  # 합리적 범위
+                                logger.debug(f"Direct ROE for {stock_code}: {roe:.2f}%")
+                                return roe
+                        except (ValueError, TypeError):
+                            continue
+
+            # 폴백: 기존 방식으로 계산
+            logger.debug(f"Falling back to manual ROE calculation for {stock_code}")
             overview_data = await self.get_stock_overview(stock_code)
             if overview_data and overview_data.get('rt_cd') == '0':
                 output = overview_data.get('output', {})
-                
-                # ROE가 직접 제공되는지 확인
-                if 'roe' in output:
-                    roe_value = output.get('roe')
-                    if roe_value and roe_value != '0' and roe_value != '-':
-                        roe_percent = float(roe_value)
-                        logger.debug(f"Direct ROE for {stock_code}: {roe_percent:.2f}%")
-                        return roe_percent
-                
-                # 수동 ROE 계산: (순이익 / 자기자본) * 100
-                net_income = output.get('net_income')  # 순이익
-                equity = output.get('equity') or output.get('stockholders_equity')  # 자기자본
-                
-                if net_income and equity:
-                    try:
-                        net_income_val = float(net_income)
-                        equity_val = float(equity)
-                        if equity_val > 0:
-                            roe = (net_income_val / equity_val) * 100
-                            logger.debug(f"Calculated ROE for {stock_code}: {roe:.2f}% (NI: {net_income_val}, Equity: {equity_val})")
-                            return roe
-                    except:
-                        pass
-                
-                # 대안 계산: PBR과 PER을 이용한 ROE 추정
-                # ROE ≈ (1/PBR) * (1/PER) * Price * 100 (근사치)
+
+                # PBR과 PER을 이용한 ROE 추정
                 pbr = await self.calculate_pbr(stock_code)
                 per = await self.calculate_per(stock_code)
-                
+
                 if pbr and per and pbr > 0 and per > 0:
-                    # DuPont 공식 근사: ROE = (Net Income/Sales) * (Sales/Assets) * (Assets/Equity)
-                    # 간단한 추정: ROE ≈ (1/PER) * (Price/Book) * 100
                     estimated_roe = (1 / per) * (1 / pbr) * 100
-                    if 0 < estimated_roe < 100:  # 합리적 범위 체크
-                        logger.debug(f"Estimated ROE for {stock_code}: {estimated_roe:.2f}% (from PBR/PER)")
+                    if -50.0 <= estimated_roe <= 100.0:
+                        logger.debug(f"Estimated ROE for {stock_code}: {estimated_roe:.2f}%")
                         return estimated_roe
-            
-            logger.warning(f"Could not calculate ROE for {stock_code} - insufficient data")
+
             return None
-            
+
         except Exception as e:
             logger.error(f"Error calculating ROE for {stock_code}: {e}")
             return None
     
     async def calculate_psr(self, stock_code: str) -> Optional[float]:
-        """PSR 계산 (주가매출액비율)"""
+        """PSR 계산 (주가매출액비율) - 새로운 재무지표 API 사용"""
         try:
-            # 현재가 조회
+            # 재무비율 API로 직접 조회
+            financial_data = await self.get_financial_ratios(stock_code)
+            if financial_data and financial_data.get('rt_cd') == '0':
+                output = financial_data.get('output', {})
+
+                # PSR이 직접 제공되는지 확인
+                for psr_key in ['psr', 'stck_psr', 'price_to_sales']:
+                    psr_value = output.get(psr_key)
+                    if psr_value and psr_value != '0' and psr_value != '-':
+                        try:
+                            psr = float(psr_value)
+                            if 0.01 <= psr <= 30.0:  # 합리적 범위
+                                logger.debug(f"Direct PSR for {stock_code}: {psr:.2f}")
+                                return psr
+                        except (ValueError, TypeError):
+                            continue
+
+            # 폴백: 기존 방식으로 계산
+            logger.debug(f"Falling back to manual PSR calculation for {stock_code}")
             price_data = await self.get_current_price(stock_code)
             if not price_data or price_data.get('rt_cd') != '0':
-                logger.warning(f"Failed to get current price for {stock_code}")
                 return None
-            
+
             current_price = float(price_data['output'].get('stck_prpr', 0))
             if current_price <= 0:
                 return None
-            
-            # 종목 개요에서 PSR 정보 조회
+
+            # SPS(주당매출액) 정보 조회 시도
             overview_data = await self.get_stock_overview(stock_code)
             if overview_data and overview_data.get('rt_cd') == '0':
                 output = overview_data.get('output', {})
-                
-                # PSR이 직접 제공되는지 확인
-                if 'psr' in output:
-                    psr_value = output.get('psr')
-                    if psr_value and psr_value != '0' and psr_value != '-':
-                        psr = float(psr_value)
-                        logger.debug(f"Direct PSR for {stock_code}: {psr:.2f}")
-                        return psr
-                
-                # 수동 PSR 계산: 시가총액 / 매출액
-                shares_outstanding = output.get('lstg_st_cnt')  # 상장주식수
-                revenue = output.get('revenue') or output.get('sales') or output.get('total_revenue')  # 매출액
-                
-                if shares_outstanding and revenue:
-                    try:
-                        shares_val = float(shares_outstanding)
-                        revenue_val = float(revenue)
-                        if revenue_val > 0 and shares_val > 0:
-                            market_cap = current_price * shares_val
-                            psr = market_cap / revenue_val
-                            logger.debug(f"Calculated PSR for {stock_code}: {psr:.2f} (MarketCap: {market_cap}, Revenue: {revenue_val})")
-                            return psr
-                    except:
-                        pass
-                
-                # 대안 계산: 주당매출액(SPS)을 이용한 PSR 계산
-                sps = output.get('sps') or output.get('sales_per_share')  # Sales Per Share
+                sps = output.get('sps') or output.get('sales_per_share')
                 if sps and float(sps) > 0:
                     psr = current_price / float(sps)
-                    logger.debug(f"Calculated PSR for {stock_code}: {psr:.2f} (Price: {current_price}, SPS: {sps})")
-                    return psr
-                
-                # 최후 추정: PER과 순이익률을 이용한 PSR 추정
-                # PSR ≈ PER × Net Margin (순이익률)
-                per = await self.calculate_per(stock_code)
-                if per and revenue:
-                    try:
-                        net_income = output.get('net_income')
-                        if net_income and float(revenue) > 0:
-                            net_margin = float(net_income) / float(revenue)
-                            if 0 < net_margin < 1:  # 합리적 순이익률 범위
-                                estimated_psr = per * net_margin
-                                if 0 < estimated_psr < 20:  # 합리적 PSR 범위
-                                    logger.debug(f"Estimated PSR for {stock_code}: {estimated_psr:.2f} (from PER × Net Margin)")
-                                    return estimated_psr
-                    except:
-                        pass
-            
-            logger.warning(f"Could not calculate PSR for {stock_code} - insufficient data")
+                    if 0.01 <= psr <= 30.0:
+                        logger.debug(f"Calculated PSR for {stock_code}: {psr:.2f}")
+                        return psr
+
             return None
-            
+
         except Exception as e:
             logger.error(f"Error calculating PSR for {stock_code}: {e}")
             return None
@@ -925,3 +1157,25 @@ class KISAPIClient:
         """만료된 캐시 정리"""
         if self.data_manager:
             self.data_manager.cleanup_cache()
+
+    def get_data_quality_report(self) -> Dict:
+        """데이터 품질 보고서 조회"""
+        if self.data_manager:
+            return self.data_manager.get_quality_report()
+        return {}
+
+    def log_data_quality_summary(self):
+        """데이터 품질 요약 로그 출력"""
+        if self.data_manager:
+            self.data_manager.log_quality_summary()
+
+    def get_blacklist_candidates(self, threshold: int = 5) -> List[str]:
+        """블랙리스트 후보 종목 조회"""
+        if self.data_manager:
+            return self.data_manager.get_blacklist_candidates(threshold)
+        return []
+
+    def add_stock_to_blacklist(self, stock_code: str, reason: str = "Manual addition"):
+        """수동으로 종목을 블랙리스트에 추가"""
+        if self.data_manager:
+            self.data_manager.add_to_blacklist(stock_code, reason)

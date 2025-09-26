@@ -23,6 +23,27 @@ class FinancialDataManager:
             # 필요시 다른 종목들도 추가 가능
         }
 
+        # 데이터 품질 모니터링 통계
+        self._quality_stats = {
+            'total_requests': 0,
+            'api_success': 0,
+            'api_failures': 0,
+            'fallback_success': 0,
+            'default_used': 0,
+            'cache_hits': 0,
+            'by_metric': {
+                'per': {'requests': 0, 'api_success': 0, 'defaults': 0},
+                'pbr': {'requests': 0, 'api_success': 0, 'defaults': 0},
+                'roe': {'requests': 0, 'api_success': 0, 'defaults': 0},
+                'psr': {'requests': 0, 'api_success': 0, 'defaults': 0},
+            },
+            'frequent_failures': {}  # 종목별 실패 횟수 추적
+        }
+
+        # 품질 보고서 출력 간격
+        self._quality_report_interval = 100  # 100번 요청마다 리포트 출력
+        self._last_quality_report = 0
+
         # 업종별 기본값 (보수적 추정치)
         self.sector_defaults = {
             'technology': {'per': 25.0, 'roe': 15.0, 'psr': 5.0, 'pbr': 3.0},
@@ -321,6 +342,23 @@ class FinancialDataManager:
     async def _get_metric_with_fallback(self, stock_code: str, metric: str, fallback_func) -> Optional[float]:
         """메트릭 조회 공통 로직 (캐싱 + 폴백) - 개선된 버전"""
         try:
+            # 통계 업데이트
+            self._quality_stats['total_requests'] += 1
+            self._quality_stats['by_metric'][metric]['requests'] += 1
+
+            # 주기적 품질 보고서 출력
+            if (self._quality_stats['total_requests'] - self._last_quality_report) >= self._quality_report_interval:
+                self.log_quality_summary()
+                self._last_quality_report = self._quality_stats['total_requests']
+
+                # 블랙리스트 후보 자동 검사
+                candidates = self.get_blacklist_candidates()
+                if candidates:
+                    logger.info(f"Blacklist candidates found: {candidates}")
+                    for candidate in candidates:
+                        if self.should_add_to_blacklist(candidate):
+                            self.add_to_blacklist(candidate, "Auto-detected frequent failures")
+
             # 현재 종목 코드 저장 (유효성 검증용)
             self._current_stock_code = stock_code
 
@@ -330,6 +368,7 @@ class FinancialDataManager:
                 value = getattr(cached_data, metric)
                 if self._is_valid_metric(metric, value):
                     logger.debug(f"Cache hit - {stock_code} {metric.upper()}: {value}")
+                    self._quality_stats['cache_hits'] += 1
                     return value
                 else:
                     logger.warning(f"Invalid cached value - {stock_code} {metric.upper()}: {value}, recalculating")
@@ -346,8 +385,14 @@ class FinancialDataManager:
 
                 if direct_value is not None and self._is_valid_metric(metric, direct_value):
                     logger.info(f"API success - {stock_code} {metric.upper()}: {direct_value}")
+                    self._quality_stats['api_success'] += 1
+                    self._quality_stats['by_metric'][metric]['api_success'] += 1
                     self.cache.update_metric(stock_code, metric, direct_value)
                     return direct_value
+
+            # API 실패 통계
+            self._quality_stats['api_failures'] += 1
+            self._track_failure(stock_code, metric)
 
             if self._should_log_warning(stock_code, metric, "api_failed"):
                 logger.warning(f"API failed for {stock_code} {metric.upper()}, trying fallbacks...")
@@ -357,6 +402,7 @@ class FinancialDataManager:
                 fallback_value = await fallback_func(stock_code)
                 if fallback_value is not None and self._is_valid_metric(metric, fallback_value):
                     logger.info(f"Fallback success - {stock_code} {metric.upper()}: {fallback_value}")
+                    self._quality_stats['fallback_success'] += 1
                     self.cache.update_metric(stock_code, metric, fallback_value)
                     return fallback_value
 
@@ -365,15 +411,21 @@ class FinancialDataManager:
             if self._is_valid_metric(metric, default_value):
                 if self._should_log_warning(stock_code, metric, "using_default"):
                     logger.warning(f"Using validated default - {stock_code} {metric.upper()}: {default_value}")
+                self._quality_stats['default_used'] += 1
+                self._quality_stats['by_metric'][metric]['defaults'] += 1
                 return default_value
             else:
                 # 기본값도 무효하면 최후 수단
                 emergency_value = self._get_emergency_default(metric)
                 logger.error(f"Using emergency default - {stock_code} {metric.upper()}: {emergency_value}")
+                self._quality_stats['default_used'] += 1
+                self._quality_stats['by_metric'][metric]['defaults'] += 1
                 return emergency_value
 
         except Exception as e:
             logger.error(f"Error getting {metric} for {stock_code}: {e}")
+            self._quality_stats['default_used'] += 1
+            self._quality_stats['by_metric'][metric]['defaults'] += 1
             return self._get_emergency_default(metric)
         finally:
             # 정리
@@ -489,3 +541,101 @@ class FinancialDataManager:
         except Exception as e:
             logger.error(f"Error in dynamic PSR estimation for {stock_code}: {e}")
             return None
+
+    def _track_failure(self, stock_code: str, metric: str):
+        """실패한 종목-메트릭 조합 추적"""
+        key = f"{stock_code}_{metric}"
+        if key not in self._quality_stats['frequent_failures']:
+            self._quality_stats['frequent_failures'][key] = 0
+        self._quality_stats['frequent_failures'][key] += 1
+
+        # 실패 횟수가 많은 종목은 블랙리스트 후보로 고려
+        if self._quality_stats['frequent_failures'][key] >= 5:
+            logger.warning(f"Stock {stock_code} has failed {metric} API {self._quality_stats['frequent_failures'][key]} times")
+
+    def get_quality_report(self) -> Dict:
+        """데이터 품질 보고서 생성"""
+        stats = self._quality_stats.copy()
+
+        # 비율 계산
+        total = stats['total_requests']
+        if total > 0:
+            stats['success_rate'] = (stats['api_success'] + stats['fallback_success']) / total * 100
+            stats['api_success_rate'] = stats['api_success'] / total * 100
+            stats['cache_hit_rate'] = stats['cache_hits'] / total * 100
+            stats['default_usage_rate'] = stats['default_used'] / total * 100
+
+            # 메트릭별 성공률
+            for metric, data in stats['by_metric'].items():
+                if data['requests'] > 0:
+                    data['api_success_rate'] = data['api_success'] / data['requests'] * 100
+                    data['default_usage_rate'] = data['defaults'] / data['requests'] * 100
+
+        # 자주 실패하는 종목 TOP 5
+        frequent_failures = sorted(
+            stats['frequent_failures'].items(),
+            key=lambda x: x[1],
+            reverse=True
+        )[:5]
+
+        stats['top_failures'] = frequent_failures
+
+        return stats
+
+    def log_quality_summary(self):
+        """품질 통계 요약 로그 출력"""
+        report = self.get_quality_report()
+
+        logger.info("=== Financial Data Quality Report ===")
+        logger.info(f"Total Requests: {report['total_requests']}")
+
+        if 'success_rate' in report:
+            logger.info(f"Overall Success Rate: {report['success_rate']:.1f}%")
+            logger.info(f"API Success Rate: {report['api_success_rate']:.1f}%")
+            logger.info(f"Cache Hit Rate: {report['cache_hit_rate']:.1f}%")
+            logger.info(f"Default Usage Rate: {report['default_usage_rate']:.1f}%")
+
+        logger.info("--- By Metric ---")
+        for metric, data in report['by_metric'].items():
+            if 'api_success_rate' in data:
+                logger.info(f"{metric.upper()}: API Success {data['api_success_rate']:.1f}%, Default Usage {data['default_usage_rate']:.1f}%")
+
+        if report['top_failures']:
+            logger.info("--- Top Failures ---")
+            for failure_key, count in report['top_failures']:
+                stock_code, metric = failure_key.split('_')
+                logger.info(f"{stock_code} ({metric.upper()}): {count} failures")
+
+    def should_add_to_blacklist(self, stock_code: str, threshold: int = 10) -> bool:
+        """종목을 블랙리스트에 추가할지 판단"""
+        total_failures = sum(
+            count for key, count in self._quality_stats['frequent_failures'].items()
+            if key.startswith(f"{stock_code}_")
+        )
+        return total_failures >= threshold
+
+    def add_to_blacklist(self, stock_code: str, reason: str = "Frequent API failures"):
+        """종목을 블랙리스트에 추가"""
+        if stock_code not in self._data_poor_stocks:
+            self._data_poor_stocks.add(stock_code)
+            logger.warning(f"Added {stock_code} to blacklist: {reason}")
+
+    def get_blacklist_candidates(self, threshold: int = 5) -> List[str]:
+        """블랙리스트 후보 종목들 반환"""
+        candidates = []
+        stock_failure_counts = {}
+
+        # 종목별 총 실패 횟수 계산
+        for key, count in self._quality_stats['frequent_failures'].items():
+            if '_' in key:
+                stock_code, _ = key.split('_', 1)
+                if stock_code not in stock_failure_counts:
+                    stock_failure_counts[stock_code] = 0
+                stock_failure_counts[stock_code] += count
+
+        # 임계값 초과 종목들
+        for stock_code, total_failures in stock_failure_counts.items():
+            if total_failures >= threshold and stock_code not in self._data_poor_stocks:
+                candidates.append(stock_code)
+
+        return candidates
