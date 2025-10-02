@@ -101,9 +101,9 @@ class StopLossManager:
         """가격 업데이트 및 트레일링 스탑 조정"""
         if symbol not in self.positions:
             return
-            
+
         position = self.positions[symbol]
-        
+
         # 최고가/최저가 업데이트
         if current_price > position.highest_price:
             position.highest_price = current_price
@@ -113,9 +113,47 @@ class StopLossManager:
                 old_trailing = position.trailing_stop_price
                 position.trailing_stop_price = new_trailing_stop
                 logger.debug(f"📈 Trailing stop updated for {symbol}: {old_trailing:,.0f} → {new_trailing_stop:,.0f}원")
-        
+
         if current_price < position.lowest_price:
             position.lowest_price = current_price
+
+    def _calculate_dynamic_holding_time(self, position: PositionInfo, current_price: float, profit_loss_pct: float) -> float:
+        """추세와 수익률에 따라 동적으로 보유시간 계산"""
+        base_time = self.max_position_time
+
+        # 1. 수익률 기반 조정
+        if profit_loss_pct > 2.0:  # 2% 이상 수익
+            # 강한 수익 추세면 보유시간 연장 (최대 2배)
+            time_multiplier = min(2.0, 1.0 + (profit_loss_pct / 10))
+            adjusted_time = base_time * time_multiplier
+            logger.debug(f"📈 수익률 {profit_loss_pct:.1f}% - 보유시간 연장: {base_time}분 → {adjusted_time:.0f}분")
+            return adjusted_time
+
+        elif profit_loss_pct < -1.0:  # 1% 이상 손실
+            # 손실 추세면 보유시간 단축 (최소 0.6배)
+            time_multiplier = max(0.6, 1.0 + (profit_loss_pct / 10))
+            adjusted_time = base_time * time_multiplier
+            logger.debug(f"📉 손실률 {profit_loss_pct:.1f}% - 보유시간 단축: {base_time}분 → {adjusted_time:.0f}분")
+            return adjusted_time
+
+        # 2. 추세 강도 기반 조정 (최고가 대비 현재가)
+        if position.highest_price > position.entry_price:
+            # 상승 후 조정 중인 경우
+            pullback_pct = ((position.highest_price - current_price) / position.highest_price) * 100
+
+            if pullback_pct > 1.5:  # 최고가 대비 1.5% 이상 하락
+                # 추세 약화 - 보유시간 단축
+                adjusted_time = base_time * 0.8
+                logger.debug(f"⚠️ 추세 약화 (최고가 대비 -{pullback_pct:.1f}%) - 보유시간 단축: {base_time}분 → {adjusted_time:.0f}분")
+                return adjusted_time
+            elif pullback_pct < 0.5 and profit_loss_pct > 0.5:  # 계속 상승 중
+                # 추세 강함 - 보유시간 연장
+                adjusted_time = base_time * 1.3
+                logger.debug(f"💪 강한 상승추세 - 보유시간 연장: {base_time}분 → {adjusted_time:.0f}분")
+                return adjusted_time
+
+        # 3. 기본값 반환
+        return base_time
     
     def check_exit_signal(self, symbol: str, current_price: float) -> Optional[Tuple[str, str, Dict]]:
         """청산 신호 체크"""
@@ -150,13 +188,15 @@ class StopLossManager:
             reason = f"트레일링스탑 도달 ({position.trailing_stop_price:,.0f}원)"
             return "트레일링스탑", reason, exit_info
         
-        # 4. 시간 기반 청산 (장시간 보유)
-        if position.age_minutes >= self.max_position_time:
+        # 4. 동적 시간 기반 청산 (추세 및 수익률에 따라 보유시간 조정)
+        dynamic_max_time = self._calculate_dynamic_holding_time(position, current_price, profit_loss_pct)
+
+        if position.age_minutes >= dynamic_max_time:
             if profit_loss_pct > 0:
-                reason = f"시간만료 익절 ({self.max_position_time}분 초과)"
+                reason = f"시간만료 익절 ({int(dynamic_max_time)}분 초과)"
                 return "시간익절", reason, exit_info
             else:
-                reason = f"시간만료 손절 ({self.max_position_time}분 초과)"
+                reason = f"시간만료 손절 ({int(dynamic_max_time)}분 초과)"
                 return "시간손절", reason, exit_info
         
         # 5. 급락/급등 보호 (5% 이상 움직임)

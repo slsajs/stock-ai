@@ -434,15 +434,9 @@ class KISAPIClient:
             logger.debug(f"Using approval key: {approval_key}")
             logger.debug(f"Attempting WebSocket connection to: {self.ws_url}")
 
-            # WebSocket 연결 옵션 설정
-            extra_headers = {
-                "User-Agent": "Python-KIS-API/1.0"
-            }
-
-            # ping/pong 설정으로 연결 유지
+            # ping/pong 설정으로 연결 유지 (extra_headers 제거)
             self.websocket = await websockets.connect(
                 self.ws_url,
-                extra_headers=extra_headers,
                 ping_interval=20,  # 20초마다 ping
                 ping_timeout=10,   # ping 응답 대기시간 10초
                 close_timeout=10   # 연결 종료 대기시간 10초
@@ -499,11 +493,14 @@ class KISAPIClient:
 
     def is_websocket_connected(self) -> bool:
         """WebSocket 연결 상태 확인"""
-        return (
-            self.websocket is not None and
-            not self.websocket.closed and
-            self.websocket.state == websockets.protocol.State.OPEN
-        )
+        try:
+            return (
+                self.websocket is not None and
+                self.websocket.state == websockets.protocol.State.OPEN
+            )
+        except AttributeError:
+            # 호환성을 위한 폴백
+            return self.websocket is not None
     
     def decrypt_data(self, encrypted_data: str) -> str:
         """WebSocket 데이터 복호화"""
@@ -835,8 +832,16 @@ class KISAPIClient:
         }
 
         if self.websocket:
-            status["websocket_state"] = str(self.websocket.state)
-            status["websocket_closed"] = self.websocket.closed
+            try:
+                status["websocket_state"] = str(self.websocket.state)
+                # closed 속성이 있으면 사용, 없으면 state로 판단
+                if hasattr(self.websocket, 'closed'):
+                    status["websocket_closed"] = self.websocket.closed
+                else:
+                    status["websocket_closed"] = self.websocket.state != websockets.protocol.State.OPEN
+            except AttributeError:
+                status["websocket_state"] = "unknown"
+                status["websocket_closed"] = False
 
         return status
 

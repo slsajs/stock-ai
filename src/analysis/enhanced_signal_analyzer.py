@@ -18,7 +18,7 @@ class EnhancedSignalAnalyzer:
         if custom_score_threshold is not None:
             self.min_signal_score = custom_score_threshold
         else:
-            self.min_signal_score = float(os.getenv('SIGNAL_SCORE_THRESHOLD', '80'))  # 기본 80점
+            self.min_signal_score = float(os.getenv('SIGNAL_SCORE_THRESHOLD', '70'))  # 70점으로 상향 (수익률 개선)
             
         # 지표별 가중치 설정 (환경변수로 조정 가능)
         self.indicator_weights = {

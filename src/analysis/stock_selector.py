@@ -113,110 +113,100 @@ class DynamicStockSelector:
             else:
                 logger.info("⏭️ Surge filtering disabled")
             
-            # 밸류에이션 필터링 적용
+            # 밸류에이션 필터링 적용 (OR 방식으로 변경 - 하나라도 통과하면 OK)
             valuation_config = self.config.get('valuation_filters', {})
-            
+
+            # 각 필터별로 통과한 종목 수집
+            passed_stocks_by_filter = {}
+            stock_codes = [s['stock_code'] for s in active_stocks]
+
             # PBR 필터링
             if valuation_config.get('enable_pbr_filter', False):
                 logger.info("🔍 Applying PBR filtering...")
-                
+
                 min_pbr = valuation_config.get('min_pbr', 0.1)
-                max_pbr = valuation_config.get('max_pbr', 2.0)
-                require_data = valuation_config.get('require_all_data', False)
-                fallback_enabled = valuation_config.get('fallback_on_data_fail', True)
-                
+                max_pbr = valuation_config.get('max_pbr', 3.0)  # 2.0 → 3.0으로 완화
+                require_data = False  # 데이터 필수 조건 완화
+
                 filtered_by_pbr = await self.valuation_analyzer.filter_by_pbr(
                     stock_codes, min_pbr, max_pbr, require_data
                 )
-                
+
                 if filtered_by_pbr:
-                    # PBR 필터링을 통과한 종목들만 유지
-                    active_stocks = [s for s in active_stocks if s['stock_code'] in filtered_by_pbr]
-                    stock_codes = [s['stock_code'] for s in active_stocks]  # 업데이트
-                    logger.info(f"📊 PBR filtering result: {len(active_stocks)} stocks passed")
-                elif not fallback_enabled:
-                    logger.warning("🚫 PBR 필터링: 모든 종목 제외됨 (폴백 비활성화)")
-                    active_stocks = []
-                else:
-                    logger.warning("❌ PBR 데이터 부족으로 필터링 우회")
-            else:
-                logger.info("⏭️ PBR filtering disabled")
-            
+                    passed_stocks_by_filter['pbr'] = set(filtered_by_pbr)
+                    logger.info(f"📊 PBR filtering result: {len(filtered_by_pbr)} stocks passed")
+
             # PER 필터링
-            if valuation_config.get('enable_per_filter', False) and active_stocks:
+            if valuation_config.get('enable_per_filter', False):
                 logger.info("🔍 Applying PER filtering...")
-                
+
                 min_per = valuation_config.get('min_per', 3.0)
-                max_per = valuation_config.get('max_per', 20.0)
-                require_data = valuation_config.get('require_all_data', False)
-                fallback_enabled = valuation_config.get('fallback_on_data_fail', True)
-                
-                stock_codes = [s['stock_code'] for s in active_stocks]
+                max_per = valuation_config.get('max_per', 30.0)  # 20.0 → 30.0으로 완화
+                require_data = False  # 데이터 필수 조건 완화
+
                 filtered_by_per = await self.valuation_analyzer.filter_by_per(
                     stock_codes, min_per, max_per, require_data
                 )
-                
+
                 if filtered_by_per:
-                    # PER 필터링을 통과한 종목들만 유지
-                    active_stocks = [s for s in active_stocks if s['stock_code'] in filtered_by_per]
-                    logger.info(f"📊 PER filtering result: {len(active_stocks)} stocks passed")
-                elif not fallback_enabled:
-                    logger.warning("🚫 PER 필터링: 모든 종목 제외됨 (폴백 비활성화)")
-                    active_stocks = []
-                else:
-                    logger.warning("❌ PER 데이터 부족으로 필터링 우회")
-            else:
-                logger.info("⏭️ PER filtering disabled")
-            
+                    passed_stocks_by_filter['per'] = set(filtered_by_per)
+                    logger.info(f"📊 PER filtering result: {len(filtered_by_per)} stocks passed")
+
             # ROE 필터링
-            if valuation_config.get('enable_roe_filter', False) and active_stocks:
+            if valuation_config.get('enable_roe_filter', False):
                 logger.info("🔍 Applying ROE filtering...")
-                
-                min_roe = valuation_config.get('min_roe', 5.0)
-                require_data = valuation_config.get('require_all_data', False)
-                fallback_enabled = valuation_config.get('fallback_on_data_fail', True)
-                
-                stock_codes = [s['stock_code'] for s in active_stocks]  # 최신 목록으로 업데이트
+
+                min_roe = valuation_config.get('min_roe', 3.0)  # 5.0 → 3.0으로 완화
+                require_data = False  # 데이터 필수 조건 완화
+
                 filtered_by_roe = await self.valuation_analyzer.filter_by_roe(
                     stock_codes, min_roe, require_data
                 )
-                
+
                 if filtered_by_roe:
-                    # ROE 필터링을 통과한 종목들만 유지
-                    active_stocks = [s for s in active_stocks if s['stock_code'] in filtered_by_roe]
-                    logger.info(f"📊 ROE filtering result: {len(active_stocks)} stocks passed")
-                elif not fallback_enabled:
-                    logger.warning("🚫 ROE 필터링: 모든 종목 제외됨 (폴백 비활성화)")
-                    active_stocks = []
-                else:
-                    logger.warning("❌ ROE 데이터 부족으로 필터링 우회")
-            else:
-                logger.info("⏭️ ROE filtering disabled")
-            
-            # PSR 필터링 (현재 비활성화됨)
-            if valuation_config.get('enable_psr_filter', False) and active_stocks:
+                    passed_stocks_by_filter['roe'] = set(filtered_by_roe)
+                    logger.info(f"📊 ROE filtering result: {len(filtered_by_roe)} stocks passed")
+
+            # PSR 필터링
+            if valuation_config.get('enable_psr_filter', False):
                 logger.info("🔍 Applying PSR filtering...")
-                
-                max_psr = valuation_config.get('max_psr', 3.0)
-                require_data = valuation_config.get('require_all_data', False)
-                fallback_enabled = valuation_config.get('fallback_on_data_fail', True)
-                
-                stock_codes = [s['stock_code'] for s in active_stocks]  # 최신 목록으로 업데이트
+
+                max_psr = valuation_config.get('max_psr', 5.0)  # 3.0 → 5.0으로 완화
+                require_data = False  # 데이터 필수 조건 완화
+
                 filtered_by_psr = await self.valuation_analyzer.filter_by_psr(
                     stock_codes, max_psr, require_data
                 )
-                
+
                 if filtered_by_psr:
-                    # PSR 필터링을 통과한 종목들만 유지
-                    active_stocks = [s for s in active_stocks if s['stock_code'] in filtered_by_psr]
-                    logger.info(f"📊 PSR filtering result: {len(active_stocks)} stocks passed")
-                elif not fallback_enabled:
-                    logger.warning("🚫 PSR 필터링: 모든 종목 제외됨 (폴백 비활성화)")
-                    active_stocks = []
+                    passed_stocks_by_filter['psr'] = set(filtered_by_psr)
+                    logger.info(f"📊 PSR filtering result: {len(filtered_by_psr)} stocks passed")
+
+            # OR 방식으로 통합: 최소 2개 이상의 지표를 통과한 종목만 선택
+            if passed_stocks_by_filter:
+                min_filters_required = valuation_config.get('min_filters_required', 2)  # 최소 2개 필터 통과
+                stock_filter_counts = {}
+
+                for filter_name, passed_codes in passed_stocks_by_filter.items():
+                    for code in passed_codes:
+                        stock_filter_counts[code] = stock_filter_counts.get(code, 0) + 1
+
+                # 최소 기준 통과한 종목만 유지
+                filtered_codes = {code for code, count in stock_filter_counts.items() if count >= min_filters_required}
+
+                if filtered_codes:
+                    active_stocks = [s for s in active_stocks if s['stock_code'] in filtered_codes]
+                    logger.info(f"✅ 밸류에이션 필터 통과: {len(active_stocks)}개 종목 (최소 {min_filters_required}개 지표 만족)")
+
+                    # 각 종목이 통과한 필터 정보 로깅
+                    for stock in active_stocks[:5]:
+                        code = stock['stock_code']
+                        passed_filters = [name for name, codes in passed_stocks_by_filter.items() if code in codes]
+                        logger.info(f"  • {stock['stock_name']}({code}): {', '.join(passed_filters).upper()} 통과")
                 else:
-                    logger.warning("❌ PSR 데이터 부족으로 필터링 우회")
+                    logger.warning(f"❌ {min_filters_required}개 이상 필터를 통과한 종목 없음, 우회")
             else:
-                logger.info("⏭️ PSR filtering disabled (데이터 부족으로 비활성화)")
+                logger.info("⏭️ 밸류에이션 필터링 전체 비활성화 또는 데이터 없음")
             
             if not active_stocks:
                 logger.warning("No stocks remaining after valuation filtering, using defaults")

@@ -51,12 +51,12 @@ class AutoTrader:
         # 리스크 관리 모듈 초기화 (임시값, 실제 잔고는 start_trading에서 업데이트)
         self.risk_manager = RiskManager(initial_balance=8000000)  # 임시 800만원
         
-        # 기존 손절 시스템 - 매도 조건 대폭 완화
+        # 기존 손절 시스템 - 수익률 개선을 위한 조정
         self.stop_loss_manager = StopLossManager(
             default_stop_loss_pct=0.02,  # 2% 손절
-            default_take_profit_pct=0.035,  # 2.5% → 3.5% 익절 (상향 조정)
-            trailing_stop_pct=0.025,  # 1.8% → 2.5% 트레일링 (여유롭게 조정)
-            max_position_time=60  # 45분 → 60분 최대 보유 (연장)
+            default_take_profit_pct=0.015,  # 1.5% 익절 (수수료 고려하여 최소 수익 확보)
+            trailing_stop_pct=0.015,  # 1.5% 트레일링 (익절 후 하락시 빠르게 청산)
+            max_position_time=60  # 60분 최대 보유 (동적으로 조정됨)
         )
         
         # 강화된 손절 시스템 추가
